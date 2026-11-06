@@ -46,13 +46,13 @@ These are baseline methods for the MVP. Per the proposal, conservation specialis
 ### Docker (recommended)
 
 ```bash
-cp .env.example .env      # set POSTGRES_PASSWORD, MINIO_*, CW_SECRET_KEY, CW_CORS_ORIGINS
+cp .env.example .env      # set POSTGRES_PASSWORD, CW_SECRET_KEY, CW_CORS_ORIGINS
 # optional: CW_SEED_DEMO=true to load the synthetic Sierra Leone pilot
 docker compose up -d --build
-open http://localhost:8080
+open http://localhost:8090
 ```
 
-Services: `db` (PostGIS 16), `redis`, `minio` (photo storage), `api` (FastAPI/gunicorn; runs migrations on start), `worker` (re-runs the risk assessment every 6 h), `web` (nginx serving the PWA and proxying `/api`). Put a TLS-terminating proxy in front for production.
+Services: `db` (PostGIS 16), `redis`, `api` (FastAPI/gunicorn; runs migrations on start; photos on the `media` volume, or any S3-compatible store via `CW_STORAGE_BACKEND=s3`), `worker` (re-runs the risk assessment every 6 h), `web` (nginx serving the PWA and proxying `/api`). Put a TLS-terminating proxy in front for production.
 
 ### Local development
 
@@ -76,10 +76,28 @@ Demo accounts (password `ChimpWatch!2026`): `admin@`, `analyst@`, `ranger@`, `vi
 ### Tests
 
 ```bash
-cd backend && pytest -q    # 31 tests; needs a chimpwatch_test PostGIS database
+cd backend && pytest -q    # 46 tests; needs a chimpwatch_test PostGIS database
 ```
 
-They cover auth and lockout, RBAC, location generalisation in every output, offline sync idempotency, EXIF stripping, the trend model, low-confidence capping, the alert state machine, field tasks, threshold auditing, all-or-nothing CSV imports, GBIF import and report content. CI (`.github/workflows/ci.yml`) also checks for migration drift and builds the frontend.
+They cover auth and lockout, the Google/Apple/GitHub sign-in flows (state, nonce, email verification, approval), RBAC, location generalisation in every output, offline sync idempotency, EXIF stripping, the trend model, low-confidence capping, the alert state machine, field tasks, threshold auditing, all-or-nothing CSV imports, GBIF import and report content. CI (`.github/workflows/ci.yml`) also checks for migration drift and builds the frontend.
+
+## Public page and sign-in with Google, Apple or GitHub
+
+Signed-out visitors land on a public page at `/welcome` with **Sign in** and **Sign up**. Both offer *Continue with Google / Apple / GitHub*. Sign-up also has an email form where people enter their full name, email, password, organisation, the access they need (field monitor, analyst or viewer), an optional phone number and why they need access, and agree to the data-use terms. Sign-in accepts email and password.
+
+**Sign-up always needs approval.** Every new sign-up, by email or through Google, Apple or GitHub, creates a *pending* viewer account with no access to data. Administrators see it under **Admin → Users → Access requests**, where they see the details the person entered (visible to administrators only), choose an organisation and role, and approve or decline. The email sign-up endpoint is rate-limited (5 per hour per network) and gives the same response for already-registered emails, so it can't be used to find out who has an account. If a provider confirms a **verified** email that matches an existing account, the two are linked automatically. Unverified emails are never linked.
+
+Each provider's button is enabled once its credentials are in `.env`; otherwise it shows as unavailable. Callback URL pattern: `{CW_PUBLIC_URL}/api/auth/oauth/<provider>/callback`.
+
+| Provider | Where to register | Callback URL to enter | `.env` values |
+|---|---|---|---|
+| Google | Google Cloud Console → APIs & Services → Credentials → *Create OAuth client ID* (Web application). Configure the consent screen with scopes `openid`, `email`, `profile`. | `http://localhost:8090/api/auth/oauth/google/callback` | `CW_GOOGLE_CLIENT_ID`, `CW_GOOGLE_CLIENT_SECRET` |
+| GitHub | GitHub → Settings → Developer settings → OAuth Apps → *New OAuth App* | `http://localhost:8090/api/auth/oauth/github/callback` | `CW_GITHUB_CLIENT_ID`, `CW_GITHUB_CLIENT_SECRET` |
+| Apple | Apple Developer → Identifiers → *Services ID* (enable Sign in with Apple and add your domain and return URL), plus Keys → a *Sign in with Apple* key (.p8). Requires a paid Apple Developer account. | `https://YOUR-DOMAIN/api/auth/oauth/apple/callback` | `CW_APPLE_CLIENT_ID` (the Services ID), `CW_APPLE_TEAM_ID`, `CW_APPLE_KEY_ID`, `CW_APPLE_PRIVATE_KEY` |
+
+Apple does not accept `localhost` or plain `http` return URLs, so Apple sign-in only works once the site runs on a real HTTPS domain. Google and GitHub work on `http://localhost:8090` for local testing. In production, set `CW_PUBLIC_URL` to your HTTPS address and update each provider's callback URL to match.
+
+Security details: the authorization-code flow uses a signed, short-lived state cookie (CSRF protection), PKCE for Google and GitHub, and a nonce for Google and Apple. ID-token issuer, audience, expiry and nonce are all checked. The resulting session token is passed to the browser in the URL fragment, which is never sent to servers or logged, and is removed from the address bar immediately. Sign-ups, links, approvals and failed attempts all go to the audit log.
 
 ## Data in
 

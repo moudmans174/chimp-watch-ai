@@ -44,6 +44,20 @@ class Settings(BaseSettings):
     gbif_api_url: str = "https://api.gbif.org/v1"
     gbif_country: str = "SL"
 
+    # Social sign-in (OAuth 2.0 / OpenID Connect). A provider is enabled when its credentials are set.
+    # public_url is the address users reach the site on; callbacks are {public_url}/api/auth/oauth/{provider}/callback
+    public_url: str = "http://localhost:8080"
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+    github_client_id: str | None = None
+    github_client_secret: str | None = None
+    apple_client_id: str | None = None  # the Services ID, e.g. org.example.chimpwatch.web
+    apple_team_id: str | None = None
+    apple_key_id: str | None = None
+    apple_private_key: str | None = None  # contents of the .p8 key (\n escapes allowed)
+    # Organisation that self sign-ups are placed in until an administrator assigns them
+    signup_org_name: str = "Pending sign-ups"
+
     seed_demo: bool = False
 
     @property

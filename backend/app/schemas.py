@@ -39,7 +39,51 @@ class UserOut(ORM):
     org: OrgOut | None = None
     can_view_sensitive: bool
     is_active: bool
+    pending_approval: bool = False
     last_login: datetime | None = None
+    created_at: datetime | None = None
+    providers: list[str] = []
+
+
+class AdminUserOut(UserOut):
+    """Includes personal details from sign-up; only returned to administrators."""
+    phone: str | None = None
+    requested_org: str | None = None
+    requested_role: str | None = None
+    signup_note: str | None = None
+
+
+class SignupIn(BaseModel):
+    full_name: str = Field(min_length=2, max_length=200)
+    email: EmailStr
+    password: str = Field(max_length=200)
+    organisation: str = Field(min_length=2, max_length=200)
+    requested_role: Role = Role.viewer
+    phone: str | None = Field(default=None, max_length=40, pattern=r"^[0-9+()\-\s]*$")
+    reason: str = Field(min_length=10, max_length=1000)
+    accept_terms: bool
+
+    @field_validator("full_name", "organisation", "reason")
+    @classmethod
+    def strip(cls, v: str) -> str:
+        v = v.strip()
+        if len(v) < 2:
+            raise ValueError("Too short")
+        return v
+
+    @field_validator("requested_role")
+    @classmethod
+    def no_admin(cls, v: Role) -> Role:
+        if v == Role.admin:
+            raise ValueError("Administrator access cannot be requested")
+        return v
+
+    @field_validator("accept_terms")
+    @classmethod
+    def must_accept(cls, v: bool) -> bool:
+        if not v:
+            raise ValueError("You must agree to the data-use terms")
+        return v
 
 
 class UserCreate(BaseModel):
@@ -53,6 +97,7 @@ class UserCreate(BaseModel):
 
 class UserUpdate(BaseModel):
     full_name: str | None = None
+    org_id: int | None = None
     role: Role | None = None
     can_view_sensitive: bool | None = None
     is_active: bool | None = None

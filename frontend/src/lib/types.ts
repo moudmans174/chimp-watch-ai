@@ -6,6 +6,8 @@ export interface User {
   id: number; email: string; full_name: string; role: Role; org_id: number;
   org?: { id: number; name: string; kind: string; country: string } | null;
   can_view_sensitive: boolean; is_active: boolean; last_login?: string | null;
+  pending_approval?: boolean; created_at?: string | null; providers?: string[];
+  phone?: string | null; requested_org?: string | null; requested_role?: Role | null; signup_note?: string | null;
 }
 
 export interface Area {

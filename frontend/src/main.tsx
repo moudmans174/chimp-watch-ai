@@ -6,7 +6,9 @@ import "./styles.css";
 import { AuthProvider, useAuth } from "./lib/auth";
 import { startAutoSync } from "./lib/offline";
 import Layout from "./components/Layout";
-import Login from "./pages/Login";
+import { AuthPage } from "./pages/Login";
+import Landing from "./pages/Landing";
+import AuthCallback from "./pages/AuthCallback";
 import Dashboard from "./pages/Dashboard";
 import MapPage from "./pages/MapPage";
 import Alerts from "./pages/Alerts";
@@ -24,7 +26,7 @@ function Guard({ children, roles }: { children: ReactNode; roles?: Role[] }) {
   const { user, ready, can } = useAuth();
   const loc = useLocation();
   if (!ready && !user) return null;
-  if (!user) return <Navigate to="/login" state={{ from: loc.pathname }} replace />;
+  if (!user) return loc.pathname === "/" ? <Navigate to="/welcome" replace /> : <Navigate to="/login" state={{ from: loc.pathname }} replace />;
   if (roles && !can(...roles)) return <Navigate to="/" replace />;
   return <>{children}</>;
 }
@@ -32,7 +34,10 @@ function Guard({ children, roles }: { children: ReactNode; roles?: Role[] }) {
 function App() {
   return (
     <Routes>
-      <Route path="/login" element={<Login />} />
+      <Route path="/welcome" element={<Landing />} />
+      <Route path="/login" element={<AuthPage mode="signin" />} />
+      <Route path="/signup" element={<AuthPage mode="signup" />} />
+      <Route path="/auth/callback" element={<AuthCallback />} />
       <Route element={<Guard><Layout /></Guard>}>
         <Route index element={<Dashboard />} />
         <Route path="map" element={<MapPage />} />

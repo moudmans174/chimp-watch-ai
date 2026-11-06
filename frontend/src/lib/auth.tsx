@@ -8,6 +8,7 @@ interface AuthCtx {
   user: User | null;
   ready: boolean;
   login: (email: string, password: string) => Promise<void>;
+  acceptToken: (token: string) => Promise<void>;
   logout: () => void;
   can: (...roles: Role[]) => boolean;
 }
@@ -47,9 +48,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(res.user);
   };
 
+  const acceptToken = async (token: string) => {
+    setToken(token);
+    const u = await api<User>("/auth/me");
+    try { localStorage.setItem(USER_KEY, JSON.stringify(u)); } catch { /* ignore */ }
+    setUser(u);
+  };
+
   const can = (...roles: Role[]) => !!user && (user.role === "admin" || roles.includes(user.role));
 
-  return <Ctx.Provider value={{ user, ready, login, logout, can }}>{children}</Ctx.Provider>;
+  return <Ctx.Provider value={{ user, ready, login, acceptToken, logout, can }}>{children}</Ctx.Provider>;
 }
 
 export function useAuth() {

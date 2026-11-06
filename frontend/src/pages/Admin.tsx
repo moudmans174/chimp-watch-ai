@@ -46,15 +46,19 @@ function Users() {
     catch (ex) { toast((ex as Error).message); }
   };
 
+  const pending = (users.data || []).filter((u) => u.pending_approval);
+  const active = (users.data || []).filter((u) => !u.pending_approval);
   return (
-    <div className="two">
+    <div className="stack">
+    {pending.length > 0 && <Approvals pending={pending} orgs={(orgs.data || []).filter((o) => o.kind !== "pending")} onDone={users.reload} />}
+    <div className="admin-users">
       <section className="panel">
         {!users.data ? <Loading /> : (
           <div className="table-wrap"><table className="data">
             <thead><tr><th>Name</th><th>Organisation</th><th>Role</th><th>Precise locations</th><th>Last sign-in</th><th></th></tr></thead>
-            <tbody>{users.data.map((u) => (
+            <tbody>{active.map((u) => (
               <tr key={u.id} style={{ opacity: u.is_active ? 1 : 0.5 }}>
-                <td>{u.full_name}<div className="xs muted">{u.email}</div></td>
+                <td>{u.full_name}<div className="xs muted">{u.email}{u.providers?.length ? ` · ${u.providers.map((p) => p[0].toUpperCase() + p.slice(1)).join(", ")}` : ""}</div></td>
                 <td className="small">{u.org?.name}</td>
                 <td><select className="input" style={{ minHeight: 34, padding: "4px 8px" }} value={u.role} disabled={u.id === me?.id} onChange={(e) => patch(u, { role: e.target.value as Role })}>
                   {Object.entries(ROLE_TEXT).map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></td>
@@ -73,7 +77,7 @@ function Users() {
         <label className="field">Temporary password <span className="hint">At least 10 characters with a number or symbol</span>
           <input className="input" type="password" required value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></label>
         <label className="field">Organisation<select className="input" required value={form.org_id} onChange={(e) => setForm({ ...form, org_id: e.target.value })}>
-          <option value="">Choose…</option>{orgs.data?.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></label>
+          <option value="">Choose…</option>{orgs.data?.filter((o) => o.kind !== "pending").map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></label>
         <label className="field">Role<select className="input" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as Role })}>
           {Object.entries(ROLE_TEXT).map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
         <label className="row small"><input type="checkbox" checked={form.can_view_sensitive} onChange={(e) => setForm({ ...form, can_view_sensitive: e.target.checked })} />Can see precise chimpanzee locations</label>
@@ -81,6 +85,53 @@ function Users() {
         <button className="btn primary">Create account</button>
       </form>
     </div>
+    </div>
+  );
+}
+
+function Approvals({ pending, orgs, onDone }: { pending: User[]; orgs: Org[]; onDone: () => void }) {
+  const [choice, setChoice] = useState<Record<number, { org_id: string; role: Role }>>({});
+  const [busy, setBusy] = useState<number | null>(null);
+  const decide = async (u: User, approve: boolean) => {
+    const c = choice[u.id] ?? { org_id: "", role: (u.requested_role ?? "viewer") as Role };
+    if (approve && !c.org_id) { toast("Choose an organisation before approving."); return; }
+    setBusy(u.id);
+    try {
+      await api(`/users/${u.id}`, { method: "PATCH", json: approve ? { is_active: true, org_id: Number(c.org_id), role: c.role } : { is_active: false } });
+      toast(approve ? `Approved ${u.full_name}` : `Declined ${u.full_name}`);
+      onDone();
+    } catch (e) { toast((e as Error).message); } finally { setBusy(null); }
+  };
+  return (
+    <section className="panel" style={{ borderColor: "var(--medium)" }}>
+      <div className="panel-head"><h2>Access requests</h2><span className="sub">{pending.length} waiting · new accounts can't see any data until approved</span></div>
+      <div className="table-wrap"><table className="data">
+        <thead><tr><th>Person</th><th>Their details</th><th>Requested</th><th>Assign organisation</th><th>Role</th><th></th></tr></thead>
+        <tbody>{pending.map((u) => {
+          const c = choice[u.id] ?? { org_id: "", role: (u.requested_role ?? "viewer") as Role };
+          const set = (p: Partial<typeof c>) => setChoice((x) => ({ ...x, [u.id]: { ...c, ...p } }));
+          return (
+            <tr key={u.id}>
+              <td>{u.full_name}<div className="xs muted">{u.email}</div>
+                <div className="xs muted">Signed up with {(u.providers || []).map((p) => p[0].toUpperCase() + p.slice(1)).join(", ") || "email"}{u.phone ? ` · ${u.phone}` : ""}</div></td>
+              <td className="small" style={{ maxWidth: 340 }}>
+                {u.requested_org ? <div><b>{u.requested_org}</b>{u.requested_role ? ` · wants ${ROLE_TEXT[u.requested_role] ?? u.requested_role}` : ""}</div> : <span className="muted">No details given</span>}
+                {u.signup_note && <div className="muted" style={{ marginTop: 2 }}>“{u.signup_note}”</div>}
+              </td>
+              <td className="small muted">{relTime(u.created_at)}</td>
+              <td><select className="input" style={{ minHeight: 34, padding: "4px 8px" }} value={c.org_id} onChange={(e) => set({ org_id: e.target.value })} aria-label="Organisation">
+                <option value="">Choose…</option>{orgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></td>
+              <td><select className="input" style={{ minHeight: 34, padding: "4px 8px" }} value={c.role} onChange={(e) => set({ role: e.target.value as Role })} aria-label="Role">
+                {Object.entries(ROLE_TEXT).filter(([v]) => v !== "admin").map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></td>
+              <td><div className="row" style={{ flexWrap: "nowrap" }}>
+                <button className="btn primary" disabled={busy === u.id} onClick={() => decide(u, true)}>Approve</button>
+                <button className="btn danger" disabled={busy === u.id} onClick={() => decide(u, false)}>Decline</button>
+              </div></td>
+            </tr>
+          );
+        })}</tbody>
+      </table></div>
+    </section>
   );
 }
 

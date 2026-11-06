@@ -1,14 +1,22 @@
+import json
+import secrets as _secrets
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import audit
+from ..config import get_settings
 from ..db import get_db
-from ..models import User
-from ..schemas import PasswordChange, Token, UserOut
+from ..models import Organisation, Role, User, UserIdentity
+from ..ratelimit import limiter
+from ..schemas import PasswordChange, SignupIn, Token, UserOut
+from ..services import oauth
 from ..security import (
     LOCKOUT_MINUTES,
     MAX_FAILED_LOGINS,
@@ -30,6 +38,8 @@ def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Ses
     if not user:
         verify_password(form.password, "$2b$12$" + "x" * 53)  # equalise timing
         raise generic
+    if user.pending_approval:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Your account is awaiting approval by an administrator.")
     if user.locked_until and user.locked_until > now:
         raise HTTPException(status.HTTP_423_LOCKED, "Account temporarily locked after repeated failed sign-ins. Try again later.")
     if not user.is_active or not verify_password(form.password, user.hashed_password):
@@ -63,3 +73,177 @@ def change_password(body: PasswordChange, request: Request, user: User = Depends
     user.hashed_password = hash_password(body.new_password)
     audit.record(db, user, "password_changed", "user", user.id, request=request)
     db.commit()
+
+
+# ============================================================================ social sign-in
+COOKIE = "cw_oauth"
+
+
+@router.get("/providers")
+def providers():
+    """Which social sign-in options this server has credentials for."""
+    return {p: oauth.enabled(p) for p in oauth.PROVIDERS}
+
+
+def _front(path: str, **params) -> RedirectResponse:
+    base = get_settings().public_url.rstrip("/")
+    frag = params.pop("_fragment", None)
+    url = f"{base}{path}" + (f"?{urlencode(params)}" if params else "") + (f"#{frag}" if frag else "")
+    r = RedirectResponse(url, status_code=303)
+    r.delete_cookie(COOKIE, path="/api/auth/oauth")
+    return r
+
+
+@router.get("/oauth/{provider}/start")
+def oauth_start(provider: str, mode: str = "signin"):
+    if provider not in oauth.PROVIDERS:
+        raise HTTPException(404, "Unknown sign-in provider")
+    if mode not in ("signin", "signup"):
+        raise HTTPException(422, "mode must be signin or signup")
+    if not oauth.enabled(provider):
+        return _front("/signup" if mode == "signup" else "/login", error="not_configured", provider=provider)
+    flow = oauth.new_flow(provider, mode)
+    r = RedirectResponse(oauth.authorize_url(flow), status_code=302)
+    secure = get_settings().public_url.startswith("https") or provider == "apple"
+    # Apple returns with a cross-site POST, which only carries SameSite=None (and therefore Secure) cookies.
+    r.set_cookie(COOKIE, oauth.seal(flow), max_age=oauth.STATE_TTL, httponly=True, path="/api/auth/oauth",
+                 secure=secure, samesite="none" if provider == "apple" else "lax")
+    return r
+
+
+def _signup_org(db: Session) -> Organisation:
+    name = get_settings().signup_org_name
+    org = db.scalar(select(Organisation).where(Organisation.name == name))
+    if not org:
+        org = Organisation(name=name, kind="pending")
+        db.add(org)
+        db.flush()
+    return org
+
+
+def _complete(db: Session, request: Request, flow: dict, profile: oauth.Profile) -> RedirectResponse:
+    now = datetime.now(timezone.utc)
+    ident = db.scalar(select(UserIdentity).where(UserIdentity.provider == profile.provider,
+                                                 UserIdentity.subject == profile.subject))
+    user = ident.user if ident else None
+    created = False
+
+    if user is None and profile.email and profile.email_verified:
+        user = db.scalar(select(User).where(func.lower(User.email) == profile.email.lower()))
+        if user is not None:
+            db.add(UserIdentity(user_id=user.id, provider=profile.provider, subject=profile.subject, email=profile.email))
+            audit.record(db, user, "identity_linked", "user", user.id, {"provider": profile.provider}, request)
+
+    if user is None:
+        if not (profile.email and profile.email_verified):
+            db.commit()
+            return _front("/signup" if flow["m"] == "signup" else "/login", error="email_required", provider=profile.provider)
+        if flow["m"] != "signup":
+            db.commit()
+            return _front("/login", error="no_account", provider=profile.provider)
+        org = _signup_org(db)
+        user = User(email=profile.email.lower(), full_name=(profile.name or profile.email.split("@")[0])[:200],
+                    hashed_password="!", role=Role.viewer, org_id=org.id, can_view_sensitive=False,
+                    is_active=False, pending_approval=True)
+        db.add(user)
+        db.flush()
+        db.add(UserIdentity(user_id=user.id, provider=profile.provider, subject=profile.subject, email=profile.email))
+        audit.record(db, user, "signup_requested", "user", user.id, {"provider": profile.provider, "email": user.email}, request)
+        created = True
+
+    if ident:
+        ident.last_used_at = now
+    if user.pending_approval:
+        db.commit()
+        return _front("/auth/callback", _fragment=f"status={'created' if created else 'pending'}&email={quote(user.email)}")
+    if not user.is_active:
+        db.commit()
+        return _front("/login", error="disabled")
+    user.last_login = now
+    user.failed_logins = 0
+    audit.record(db, user, "login", "user", user.id, {"provider": profile.provider}, request)
+    db.commit()
+    return _front("/auth/callback", _fragment=f"token={create_access_token(user)}")
+
+
+def _callback(provider: str, request: Request, db: Session, params: dict) -> RedirectResponse:
+    mode_guess = "signin"
+    try:
+        flow = oauth.unseal(request.cookies.get(COOKIE))
+        mode_guess = flow.get("m", "signin")
+        if flow.get("p") != provider or not params.get("state") or not _secrets.compare_digest(str(params["state"]), flow["s"]):
+            raise oauth.OAuthError("state_mismatch", "State does not match this sign-in attempt")
+        if params.get("error"):
+            raise oauth.OAuthError("cancelled", str(params["error"]))
+        if not params.get("code"):
+            raise oauth.OAuthError("provider_error", "No authorisation code returned")
+        apple_user = None
+        if params.get("user"):
+            try:
+                apple_user = json.loads(params["user"])
+            except ValueError:
+                apple_user = None
+        profile = oauth.exchange(flow, str(params["code"]), apple_user)
+        return _complete(db, request, flow, profile)
+    except oauth.OAuthError as exc:
+        audit.record(db, None, "oauth_failed", "auth", None, {"provider": provider, "code": exc.code, "detail": str(exc)}, request)
+        db.commit()
+        return _front("/signup" if mode_guess == "signup" else "/login", error=exc.code, provider=provider)
+    except Exception as exc:  # network failures and unexpected provider responses
+        audit.record(db, None, "oauth_failed", "auth", None, {"provider": provider, "code": "provider_error",
+                                                             "detail": type(exc).__name__}, request)
+        db.commit()
+        return _front("/signup" if mode_guess == "signup" else "/login", error="provider_error", provider=provider)
+
+
+@router.get("/oauth/{provider}/callback")
+def oauth_callback_get(provider: str, request: Request, db: Session = Depends(get_db)):
+    if provider not in oauth.PROVIDERS:
+        raise HTTPException(404, "Unknown sign-in provider")
+    return _callback(provider, request, db, dict(request.query_params))
+
+
+@router.post("/oauth/{provider}/callback")
+async def oauth_callback_post(provider: str, request: Request, db: Session = Depends(get_db)):
+    """Apple uses response_mode=form_post."""
+    if provider not in oauth.PROVIDERS:
+        raise HTTPException(404, "Unknown sign-in provider")
+    form = await request.form()
+    params = {k: v for k, v in form.items() if isinstance(v, str)}
+    return await run_in_threadpool(_callback, provider, request, db, params)
+
+
+# ============================================================================ email sign-up
+SIGNUP_ACK = {"status": "pending",
+              "message": "Request received. An administrator will review it before you can sign in."}
+
+
+@router.post("/signup", status_code=202)
+def signup(body: SignupIn, request: Request, db: Session = Depends(get_db)):
+    """Self-service sign-up. Creates a pending account with no data access until an admin approves it.
+
+    The response is identical whether or not the email is already registered, so the endpoint
+    cannot be used to discover who has an account.
+    """
+    ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "?").split(",")[0].strip()
+    if not limiter.allow(f"signup:{ip}", 5, 3600):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many sign-up attempts from this network. Try again later.")
+    validate_password_strength(body.password)
+    email = body.email.lower()
+    existing = db.scalar(select(User).where(func.lower(User.email) == email))
+    if existing:
+        audit.record(db, existing, "signup_duplicate", "user", existing.id, {"email": email}, request)
+        db.commit()
+        return SIGNUP_ACK
+    org = _signup_org(db)
+    u = User(email=email, full_name=body.full_name, hashed_password=hash_password(body.password), role=Role.viewer,
+             org_id=org.id, can_view_sensitive=False, is_active=False, pending_approval=True,
+             phone=(body.phone or "").strip() or None, requested_org=body.organisation,
+             requested_role=body.requested_role.value, signup_note=body.reason)
+    db.add(u)
+    db.flush()
+    audit.record(db, u, "signup_requested", "user", u.id, {"provider": "email", "email": email,
+                                                           "requested_role": body.requested_role.value,
+                                                           "requested_org": body.organisation}, request)
+    db.commit()
+    return SIGNUP_ACK

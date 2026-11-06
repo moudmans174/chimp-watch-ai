@@ -43,6 +43,7 @@ export default function MapView({ areas, observations, pressures, layers = {}, o
   const lyr = useRef<Record<string, TileLayer | VectorLayer>>({});
   const [pop, setPop] = useState<{ x: number; y: number; html: React.ReactNode } | null>(null);
   const clickRef = useRef(onAreaClick);
+  const fitRef = useRef<number[] | null>(null);
   clickRef.current = onAreaClick;
 
   useEffect(() => {
@@ -103,7 +104,15 @@ export default function MapView({ areas, observations, pressures, layers = {}, o
       if (f && clickRef.current) clickRef.current(Number(f.get("id")));
     });
     mapRef.current = map;
-    const ro = new ResizeObserver(() => map.updateSize());
+    // Re-fit to the data when the panel resizes, until the user pans or zooms themselves.
+    let userMoved = false;
+    map.on("pointerdrag", () => { userMoved = true; });
+    el.current.addEventListener("wheel", () => { userMoved = true; }, { passive: true });
+    const ro = new ResizeObserver(() => {
+      map.updateSize();
+      const ext = fitRef.current;
+      if (!userMoved && ext) map.getView().fit(ext, { padding: [40, 40, 40, 40], maxZoom: 11 });
+    });
     ro.observe(el.current);
     return () => { ro.disconnect(); map.setTarget(undefined); };
   }, []);
@@ -118,6 +127,7 @@ export default function MapView({ areas, observations, pressures, layers = {}, o
     const target = focusAreaId ? s.getFeatures().find((f) => f.get("id") === focusAreaId) : null;
     const extent = target?.getGeometry()?.getExtent() ?? s.getExtent();
     if (!extent) return;
+    fitRef.current = extent;
     map.getView().fit(extent, { padding: [40, 40, 40, 40], maxZoom: 11 });
   }, [areas, focusAreaId]);
 

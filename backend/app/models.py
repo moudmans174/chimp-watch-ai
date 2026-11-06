@@ -104,12 +104,41 @@ class User(Base):
     org_id: Mapped[int] = mapped_column(ForeignKey("organisations.id"))
     can_view_sensitive: Mapped[bool] = mapped_column(Boolean, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Self sign-ups wait here (inactive) until an administrator approves them.
+    pending_approval: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", index=True)
+    # Details supplied at self sign-up, shown to administrators when reviewing the request
+    phone: Mapped[str | None] = mapped_column(String(40))
+    requested_org: Mapped[str | None] = mapped_column(String(200))
+    requested_role: Mapped[str | None] = mapped_column(String(32))
+    signup_note: Mapped[str | None] = mapped_column(Text)
     failed_logins: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_login: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     org: Mapped[Organisation] = relationship(lazy="joined")
+    identities: Mapped[list[UserIdentity]] = relationship(back_populates="user", cascade="all, delete-orphan",
+                                                          lazy="selectin")
+
+    @property
+    def providers(self) -> list[str]:
+        return sorted({i.provider for i in self.identities})
+
+
+class UserIdentity(Base):
+    """An external sign-in (Google, Apple, GitHub) linked to a user account."""
+
+    __tablename__ = "user_identities"
+    __table_args__ = (UniqueConstraint("provider", "subject", name="uq_identity_provider_subject"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String(20))
+    subject: Mapped[str] = mapped_column(String(255))
+    email: Mapped[str | None] = mapped_column(String(254))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    user: Mapped[User] = relationship(back_populates="identities")
 
 
 class ProtectedArea(Base):

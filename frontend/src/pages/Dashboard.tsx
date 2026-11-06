@@ -4,7 +4,8 @@ import { fmtDate, num, relTime } from "../lib/format";
 import type { Alert, Level } from "../lib/types";
 import MapView, { MapLegend, type Pressure } from "../components/MapView";
 import { BarChart } from "../components/charts";
-import { Empty, ErrorBox, IndicatorStrip, LevelBadge, Loading } from "../components/ui";
+import { Empty, ErrorBox, Icon, IndicatorStrip, LevelBadge, Loading } from "../components/ui";
+import ForestScene from "../components/ForestScene";
 
 interface Dash {
   observations: Record<string, number>;
@@ -36,26 +37,34 @@ export default function Dashboard() {
 
   return (
     <>
-      <header className="page-head">
-        <div>
-          <h1>{highCount > 0 ? `${highCount} landscape${highCount > 1 ? "s" : ""} need urgent attention` : "No landscapes at high concern"}</h1>
-          <p>Six pilot landscapes, five separate indicators each. Last assessed {relTime(data.last_assessment)}; modelled indicators are estimates with stated uncertainty.</p>
+      <section className="dash-hero">
+        <ForestScene variant="band" />
+        <div className="dash-hero-inner">
+          <div>
+            <div className="eyebrow-loc"><Icon name="map" />Sierra Leone pilot · 6 protected landscapes</div>
+            <h1>{highCount > 0 ? `${highCount} landscape${highCount > 1 ? "s" : ""} need urgent attention` : "No landscapes at high concern"}</h1>
+            <p>Five separate indicators per landscape. Last assessed {relTime(data.last_assessment)}; modelled indicators are estimates with stated uncertainty.</p>
+          </div>
+          <div className="page-actions">
+            <Link className="btn" to="/reports">Situation report</Link>
+            <Link className="btn primary" to="/alerts">Review alerts</Link>
+          </div>
         </div>
-        <div className="page-actions">
-          <Link className="btn" to="/reports">Situation report</Link>
-          <Link className="btn primary" to="/alerts">Review alerts</Link>
-        </div>
-      </header>
+      </section>
 
-      <section className="panel kpis" aria-label="Key indicators">
-        <div className="kpi"><span className="v">{num(data.chimp_records_12m)}</span><span className="l">Verified chimpanzee records, 12 months</span>
+      <section className="kpi-row" aria-label="Key indicators">
+        <div className="kpi-card"><span className="ic chimp"><Icon name="paw" /></span><span className="v">{num(data.chimp_records_12m)}</span>
+          <span className="l">Verified chimpanzee records, 12 months</span>
           <span className="d">{change === null ? "No prior year to compare" : `${change >= 0 ? "+" : ""}${change.toFixed(0)}% vs previous 12 months`}</span></div>
-        <div className="kpi"><span className="v">{num(data.habitat.forest_cover_km2)} km²</span><span className="l">Forest cover in pilot areas</span>
+        <div className="kpi-card"><span className="ic forest"><Icon name="tree" /></span><span className="v">{num(data.habitat.forest_cover_km2)} km²</span>
+          <span className="l">Forest cover in pilot areas</span>
           <span className="d">{num(data.habitat.forest_loss_km2_latest, 1)} km² lost in {data.habitat.latest_period?.slice(0, 4) ?? "—"} ({data.habitat.loss_rate_pct ?? "—"}%)</span></div>
-        <div className="kpi"><span className="v">{(data.open_alerts.high ?? 0) + (data.open_alerts.medium ?? 0)}</span><span className="l">Open alerts</span>
-          <span className="d">{data.open_alerts.high ?? 0} high · {data.open_alerts.medium ?? 0} medium</span></div>
-        <div className="kpi"><span className="v">{num(data.pressures_90d)}</span><span className="l">Pressure reports, 90 days</span><span className="d">Mining, logging, snares, clearing</span></div>
-        <div className="kpi"><span className="v">{num(data.observations.pending ?? 0)}</span><span className="l">Records awaiting validation</span><span className="d">{data.tasks_open} field tasks open</span></div>
+        <div className="kpi-card"><span className="ic alert"><Icon name="alert" /></span><span className="v">{(data.open_alerts.high ?? 0) + (data.open_alerts.medium ?? 0)}</span>
+          <span className="l">Open alerts</span><span className="d">{data.open_alerts.high ?? 0} high · {data.open_alerts.medium ?? 0} medium</span></div>
+        <div className="kpi-card"><span className="ic press"><Icon name="axe" /></span><span className="v">{num(data.pressures_90d)}</span>
+          <span className="l">Pressure reports, 90 days</span><span className="d">Mining, logging, snares, clearing</span></div>
+        <div className="kpi-card"><span className="ic"><Icon name="check" /></span><span className="v">{num(data.observations.pending ?? 0)}</span>
+          <span className="l">Records awaiting validation</span><span className="d">{data.tasks_open} field tasks open</span></div>
       </section>
 
       <div className="dash">

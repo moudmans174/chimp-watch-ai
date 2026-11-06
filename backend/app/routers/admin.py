@@ -3,9 +3,10 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import audit
+from ..config import get_settings
 from ..db import get_db
 from ..models import AlertThreshold, AuditLog, Organisation, Role, User
-from ..schemas import AuditOut, OrgIn, OrgOut, ThresholdIn, ThresholdOut, UserCreate, UserOut, UserUpdate
+from ..schemas import AdminUserOut, AuditOut, OrgIn, OrgOut, ThresholdIn, ThresholdOut, UserCreate, UserOut, UserUpdate
 from ..security import admin_only, can_analyse, get_current_user, hash_password, validate_password_strength
 from ..services.risk import ensure_thresholds
 
@@ -29,12 +30,15 @@ def create_org(body: OrgIn, request: Request, db: Session = Depends(get_db), use
     return org
 
 
-@router.get("/users", response_model=list[UserOut])
-def list_users(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    q = select(User).order_by(User.full_name)
+@router.get("/users", response_model=list[AdminUserOut] | list[UserOut])
+def list_users(pending: bool | None = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    q = select(User).order_by(User.pending_approval.desc(), User.full_name)
     if user.role != Role.admin:
         q = q.where(User.is_active.is_(True))
-    return db.scalars(q).all()
+    if pending is not None:
+        q = q.where(User.pending_approval.is_(pending))
+    schema = AdminUserOut if user.role == Role.admin else UserOut
+    return [schema.model_validate(u) for u in db.scalars(q).all()]
 
 
 @router.post("/users", response_model=UserOut, status_code=201)
@@ -64,14 +68,26 @@ def update_user(user_id: int, body: UserUpdate, request: Request, db: Session = 
     changes = body.model_dump(exclude_unset=True)
     if u.id == user.id and (changes.get("role") not in (None, Role.admin) or changes.get("is_active") is False):
         raise HTTPException(400, "You cannot remove your own administrator access")
+    if "org_id" in changes and not db.get(Organisation, changes["org_id"]):
+        raise HTTPException(422, "Unknown organisation")
+    approving = u.pending_approval and changes.get("is_active") is True
+    if approving:
+        if "org_id" not in changes and u.org and u.org.name == get_settings().signup_org_name:
+            raise HTTPException(422, "Assign an organisation before approving this account")
+        u.pending_approval = False
+        changes["approved"] = True
+    rejecting = u.pending_approval and changes.get("is_active") is False
+    if rejecting:
+        u.pending_approval = False
+        changes["rejected"] = True
     if "password" in changes:
         validate_password_strength(changes["password"])
         u.hashed_password = hash_password(changes.pop("password"))
         changes["password"] = "***"
     for k, v in changes.items():
-        if k != "password":
+        if k not in ("password", "approved", "rejected"):
             setattr(u, k, v)
-    audit.record(db, user, "update", "user", u.id, {k: (v.value if hasattr(v, "value") else v) for k, v in changes.items()}, request)
+    audit.record(db, user, "approve" if approving else "reject" if rejecting else "update", "user", u.id, {k: (v.value if hasattr(v, "value") else v) for k, v in changes.items()}, request)
     db.commit()
     db.refresh(u)
     return u

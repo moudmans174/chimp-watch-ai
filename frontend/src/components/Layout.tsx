@@ -5,12 +5,14 @@ import { api } from "../lib/api";
 import { onQueueChange, queued } from "../lib/offline";
 import { ROLE_TEXT } from "../lib/format";
 import { Icon, ToastHost } from "./ui";
+import ForestScene from "./ForestScene";
 
 export default function Layout() {
   const { user, logout, can } = useAuth();
   const [online, setOnline] = useState(navigator.onLine);
   const [openHigh, setOpenHigh] = useState(0);
   const [outbox, setOutbox] = useState(0);
+  const [pendingUsers, setPendingUsers] = useState(0);
 
   useEffect(() => {
     const on = () => setOnline(true), off = () => setOnline(false);
@@ -24,7 +26,8 @@ export default function Layout() {
 
   useEffect(() => {
     api<{ total: number }>("/alerts?open_only=true&level=high&limit=1").then((r) => setOpenHigh(r.total)).catch(() => {});
-  }, []);
+    if (user?.role === "admin") api<unknown[]>("/users?pending=true").then((r) => setPendingUsers(r.length)).catch(() => {});
+  }, [user?.role]);
 
   const link = (to: string, icon: string, label: string, extra?: React.ReactNode, secondary = false) => (
     <NavLink to={to} end={to === "/"} className={({ isActive }) => `nav-link ${secondary ? "secondary" : ""} ${isActive ? "active" : ""}`}>
@@ -44,13 +47,14 @@ export default function Layout() {
         {link("/tasks", "tasks", "Field tasks")}
         {link("/ecosystem", "eco", "Ecosystem", null, true)}
         {link("/reports", "report", "Reports", null, true)}
-        {can() && link("/admin", "admin", "Admin", null, true)}
+        {can() && link("/admin", "admin", "Admin", pendingUsers > 0 ? <span className="count" style={{ background: "var(--medium)" }} aria-label={`${pendingUsers} access requests`}>{pendingUsers}</span> : null, true)}
         <div className="rail-foot">
           <div className="who">{user?.full_name}</div>
           <div>{ROLE_TEXT[user?.role ?? "viewer"]} · {user?.org?.name?.replace(" (demo)", "")}</div>
           <div className={`net ${online ? "" : "off"}`}><i />{online ? "Online" : "Offline — records are saved on this device"}</div>
           <div><button onClick={logout}>Sign out</button></div>
         </div>
+        <div className="rail-forest"><ForestScene variant="rail" /></div>
       </nav>
       <main className="main">
         <div className="mobile-top">
