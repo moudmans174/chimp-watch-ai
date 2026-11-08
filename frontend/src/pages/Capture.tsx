@@ -1,6 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../lib/api";
-import { discard, enqueue, onQueueChange, queued, syncNow, type QueuedObservation } from "../lib/offline";
+import { activeSession, cancelSession, discard, enqueue, finishSession, onQueueChange, queued, startSession, syncNow, type QueuedObservation, type SurveySession } from "../lib/offline";
+import { useApi } from "../lib/useApi";
+import type { Area } from "../lib/types";
 import { humanize } from "../lib/format";
 import { ErrorBox, toast } from "../components/ui";
 
@@ -32,23 +34,31 @@ function useGps() {
 export default function Capture() {
   const [mode, setMode] = useState<"chimp" | "pressure">("chimp");
   const [queue, setQueue] = useState<QueuedObservation[]>([]);
-  useEffect(() => { const r = () => { void queued().then(setQueue); }; r(); const un = onQueueChange(r); return () => { un(); }; }, []);
+  const [session, setSession] = useState<SurveySession | null>(activeSession());
+  useEffect(() => {
+    const r = () => { void queued().then(setQueue); setSession(activeSession()); };
+    r();
+    const un = onQueueChange(r);
+    return () => { un(); };
+  }, []);
+  const heldBySession = session ? queue.filter((q) => q.payload.survey_client_uuid === session.client_uuid).length : 0;
 
   return (
     <div className="capture">
       <header className="page-head">
         <div>
-          <h1>Record in the field</h1>
+          <h1>Add a record</h1>
           <p>Works without signal. Records are saved on this device and sent automatically when you are back online.</p>
         </div>
       </header>
+      <SurveyPanel session={session} recorded={heldBySession} />
       <div className="tabs" role="tablist">
         <button role="tab" aria-selected={mode === "chimp"} onClick={() => setMode("chimp")}>Chimpanzee sign</button>
         <button role="tab" aria-selected={mode === "pressure"} onClick={() => setMode("pressure")}>Human pressure</button>
       </div>
       {queue.length > 0 && (
         <div className="queue stack" style={{ gap: 8, marginBottom: 16 }}>
-          <div className="spread"><b>{queue.length} record{queue.length > 1 ? "s" : ""} waiting to send</b>
+          <div className="spread"><b>{queue.length} record{queue.length > 1 ? "s" : ""} waiting to send{heldBySession ? ` (${heldBySession} held until the survey ends)` : ""}</b>
             <button className="btn" onClick={async () => { const r = await syncNow(); toast(r.sent ? `Sent ${r.sent} record${r.sent > 1 ? "s" : ""}` : navigator.onLine ? "Nothing sent — see errors below" : "Still offline"); }}>Send now</button></div>
           {queue.filter((q) => q.last_error).map((q) => (
             <div key={q.client_uuid} className="small spread"><span>{humanize(String(q.payload.evidence_type))}, {new Date(String(q.payload.observed_at)).toLocaleString("en-GB")}: {q.last_error}</span>
@@ -56,7 +66,7 @@ export default function Capture() {
           ))}
         </div>
       )}
-      {mode === "chimp" ? <ChimpForm /> : <PressureForm />}
+      {mode === "chimp" ? <ChimpForm session={session} /> : <PressureForm />}
     </div>
   );
 }
@@ -78,7 +88,91 @@ function Coords({ gps, lat, lon, setLat, setLon }: { gps: ReturnType<typeof useG
   );
 }
 
-function ChimpForm() {
+function SurveyPanel({ session, recorded }: { session: SurveySession | null; recorded: number }) {
+  const areas = useApi<Area[]>("/areas");
+  const [open, setOpen] = useState(false);
+  const [areaId, setAreaId] = useState("");
+  const [method, setMethod] = useState<SurveySession["method"]>("recce");
+  const [team, setTeam] = useState("");
+  const [km, setKm] = useState("");
+  const [notes, setNotes] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+
+  if (session) {
+    const started = new Date(session.started_at);
+    return (
+      <section className="survey-live" aria-live="polite">
+        <div className="spread" style={{ alignItems: "flex-start" }}>
+          <div>
+            <div className="live-dot"><i />Survey in progress</div>
+            <h2>{session.area_name}</h2>
+            <p className="small muted">{humanize(session.method)}{session.team ? ` · ${session.team}` : ""} · started {started.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })} · {recorded} sign{recorded === 1 ? "" : "s"} recorded</p>
+          </div>
+        </div>
+        <div className="row" style={{ alignItems: "end", marginTop: 12 }}>
+          <label className="field" style={{ flex: "1 1 160px" }}>Distance walked (km)
+            <input className="input" inputMode="decimal" value={km} onChange={(e) => setKm(e.target.value)} placeholder="e.g. 4.5" /></label>
+          <label className="field" style={{ flex: "2 1 220px" }}>Notes <span className="hint">Optional</span>
+            <input className="input" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Weather, route, team changes" /></label>
+        </div>
+        {err && <div className="error-box" style={{ marginTop: 10 }}>{err}</div>}
+        <div className="row" style={{ marginTop: 12 }}>
+          <button className="btn primary" onClick={async () => {
+            const v = Number(km);
+            if (!km || Number.isNaN(v) || v <= 0 || v > 200) { setErr("Enter the distance walked in kilometres (for example 4.5)."); return; }
+            setErr(null);
+            await finishSession(v, notes);
+            toast(navigator.onLine ? "Survey finished and sent" : "Survey finished. It will send when you're online.");
+            setKm(""); setNotes("");
+          }}>Finish survey</button>
+          <button className="btn ghost" onClick={async () => {
+            if (window.confirm("Cancel this survey? Signs you recorded are kept as ordinary records.")) { await cancelSession(); toast("Survey cancelled"); }
+          }}>Cancel survey</button>
+        </div>
+        <p className="xs muted" style={{ marginTop: 8 }}>Signs recorded during a survey are linked to it, so the platform can calculate encounter rates per kilometre.</p>
+      </section>
+    );
+  }
+  if (!open) {
+    return (
+      <section className="survey-start">
+        <div><b>Walking a transect or recce?</b><p className="small muted">Start a survey so your signs count towards encounter-rate trends.</p></div>
+        <button className="btn" onClick={() => setOpen(true)}>Start a survey</button>
+      </section>
+    );
+  }
+  return (
+    <section className="survey-start open">
+      <div className="stack" style={{ gap: 12, width: "100%" }}>
+        <b>Start a survey</b>
+        <div className="grid2">
+          <label className="field">Landscape
+            <select className="input" value={areaId} onChange={(e) => setAreaId(e.target.value)}>
+              <option value="">Choose…</option>{areas.data?.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select></label>
+          <label className="field">Method
+            <select className="input" value={method} onChange={(e) => setMethod(e.target.value as SurveySession["method"])}>
+              <option value="recce">Recce walk</option><option value="line_transect">Line transect</option><option value="patrol">Patrol</option>
+            </select></label>
+        </div>
+        <label className="field">Team <span className="hint">Optional</span>
+          <input className="input" value={team} onChange={(e) => setTeam(e.target.value)} placeholder="e.g. Team A, 3 people" /></label>
+        {err && <div className="error-box">{err}</div>}
+        <div className="row">
+          <button className="btn primary" onClick={() => {
+            const a = areas.data?.find((x) => String(x.id) === areaId);
+            if (!a) { setErr(areas.data ? "Choose the landscape you're surveying." : "The landscape list needs a connection the first time. Connect once, then it works offline."); return; }
+            startSession({ area_id: a.id, area_name: a.name, method, team });
+            toast("Survey started");
+          }}>Start survey</button>
+          <button className="btn ghost" onClick={() => setOpen(false)}>Not now</button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ChimpForm({ session }: { session: SurveySession | null }) {
   const gps = useGps();
   const [evidence, setEvidence] = useState("nest");
   const [count, setCount] = useState(1);
@@ -98,10 +192,11 @@ function ChimpForm() {
     await enqueue({
       client_uuid, photos, queued_at: new Date().toISOString(),
       payload: { evidence_type: evidence, count, observed_at: new Date(when).toISOString(), lat: la, lon: lo,
-        gps_accuracy_m: gps.pos?.acc ?? null, notes: notes || null, species: "Pan troglodytes verus", common_name: "Western chimpanzee" },
+        gps_accuracy_m: gps.pos?.acc ?? null, notes: notes || null, species: "Pan troglodytes verus", common_name: "Western chimpanzee",
+        ...(session ? { survey_client_uuid: session.client_uuid } : {}) },
     });
     const r = await syncNow();
-    toast(r.sent ? "Record sent for validation" : "Saved on this device. It will send when you're online.");
+    toast(session ? "Sign saved to this survey" : r.sent ? "Record sent for validation" : "Saved on this device. It will send when you're online.");
     setCount(1); setNotes(""); setPhotos([]); setWhen(localNow());
   };
 

@@ -109,7 +109,7 @@ export function AuthPage({ mode }: { mode: Mode }) {
                 <label className="field">Email
                   <input className="input" type="email" autoComplete="username" required value={email} onChange={(e) => setEmail(e.target.value)} />
                 </label>
-                <label className="field">Password
+                <label className="field"><span className="spread">Password <Link className="xs" to="/forgot-password">Forgot password?</Link></span>
                   <input className="input" type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} />
                 </label>
                 <ErrorBox error={error} />

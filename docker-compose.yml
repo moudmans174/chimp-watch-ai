@@ -1,7 +1,7 @@
 # CHIMP-WATCH AI — full stack.
 #   cp .env.example .env   # then set strong secrets
 #   docker compose up -d --build
-# Web UI on http://localhost:8092 (set CW_WEB_PORT in .env to change)
+# Web UI on http://localhost:8090 (set CW_WEB_PORT in .env to change)
 services:
   db:
     image: postgis/postgis:16-3.4
@@ -31,7 +31,7 @@ services:
     environment:
       CW_DATABASE_URL: postgresql+psycopg://chimp:${POSTGRES_PASSWORD}@db:5432/chimpwatch
       CW_REDIS_URL: redis://redis:6379/0
-      CW_PUBLIC_URL: ${CW_PUBLIC_URL:-http://localhost:8092}
+      CW_PUBLIC_URL: ${CW_PUBLIC_URL:-http://localhost:8090}
       # Photos are stored on a Docker volume. For S3-compatible storage instead, set
       # CW_STORAGE_BACKEND=s3 plus CW_S3_ENDPOINT_URL / CW_S3_ACCESS_KEY / CW_S3_SECRET_KEY in .env.
       CW_STORAGE_BACKEND: ${CW_STORAGE_BACKEND:-local}
@@ -47,13 +47,15 @@ services:
       CW_DATABASE_URL: postgresql+psycopg://chimp:${POSTGRES_PASSWORD}@db:5432/chimpwatch
       CW_REDIS_URL: redis://redis:6379/0
     command: ["python", "-m", "app.worker"]
+    healthcheck:
+      disable: true   # the worker serves no HTTP; the image health check is for the API
 
   web:
     build: ./frontend
     restart: unless-stopped
     depends_on: [api]
     # Change CW_WEB_PORT (and CW_PUBLIC_URL to match) in .env if this port is already in use
-    ports: ["${CW_WEB_PORT:-8092}:80"]
+    ports: ["${CW_WEB_PORT:-8090}:80"]
 
 volumes:
   dbdata:

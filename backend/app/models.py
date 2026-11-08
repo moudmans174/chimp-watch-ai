@@ -161,6 +161,9 @@ class SurveyEffort(Base):
 
     __tablename__ = "survey_efforts"
     id: Mapped[int] = mapped_column(primary_key=True)
+    client_uuid: Mapped[str | None] = mapped_column(String(36), unique=True)  # set by the offline field app
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    notes: Mapped[str | None] = mapped_column(Text)
     area_id: Mapped[int] = mapped_column(ForeignKey("protected_areas.id"), index=True)
     org_id: Mapped[int | None] = mapped_column(ForeignKey("organisations.id"))
     method: Mapped[str] = mapped_column(String(40))  # line_transect | recce | camera_trap | patrol

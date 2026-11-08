@@ -8,6 +8,7 @@ from ..db import get_db
 from ..models import AlertThreshold, AuditLog, Organisation, Role, User
 from ..schemas import AdminUserOut, AuditOut, OrgIn, OrgOut, ThresholdIn, ThresholdOut, UserCreate, UserOut, UserUpdate
 from ..security import admin_only, can_analyse, get_current_user, hash_password, validate_password_strength
+from ..services import notify
 from ..services.risk import ensure_thresholds
 
 router = APIRouter(prefix="/api", tags=["admin"])
@@ -90,6 +91,10 @@ def update_user(user_id: int, body: UserUpdate, request: Request, db: Session = 
     audit.record(db, user, "approve" if approving else "reject" if rejecting else "update", "user", u.id, {k: (v.value if hasattr(v, "value") else v) for k, v in changes.items()}, request)
     db.commit()
     db.refresh(u)
+    if approving:
+        notify.approved(u)
+    elif rejecting:
+        notify.declined(u)
     return u
 
 

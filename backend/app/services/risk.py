@@ -408,17 +408,22 @@ def generate_alerts(db: Session, ra: RiskAssessment) -> list[Alert]:
     return changed
 
 
-def run_all(db: Session) -> dict:
+def run_all(db: Session, notify_users: bool = True) -> dict:
     thresholds = ensure_thresholds(db)
     areas = db.scalars(select(ProtectedArea)).all()
     results = {"assessed": 0, "alerts_created_or_escalated": 0, "levels": {}}
+    changed: list[Alert] = []
     for area in areas:
         ra = assess_area(db, area, thresholds)
         alerts = generate_alerts(db, ra)
+        changed.extend(alerts)
         results["assessed"] += 1
         results["alerts_created_or_escalated"] += len(alerts)
         results["levels"][area.name] = ra.overall_level.value
     db.commit()
+    if notify_users:
+        from . import notify
+        notify.high_alerts(db, changed)
     return results
 
 

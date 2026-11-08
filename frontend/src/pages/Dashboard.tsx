@@ -70,7 +70,8 @@ export default function Dashboard() {
       <div className="dash">
         <section className="panel dash-map" aria-label="Map of pilot landscapes">
           <MapView areas={areas.data} observations={obs.data} pressures={press.data} onAreaClick={(id) => nav(`/areas/${id}`)} />
-          <MapLegend />
+          <MapLegend compact />
+          <Link className="btn map-open" to="/map">Open full map</Link>
         </section>
 
         <div className="dash-side">

@@ -1,32 +1,69 @@
-import { useEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import "ol/ol.css";
 import OLMap from "ol/Map";
 import View from "ol/View";
 import TileLayer from "ol/layer/Tile";
 import VectorLayer from "ol/layer/Vector";
+import HeatmapLayer from "ol/layer/Heatmap";
 import VectorSource from "ol/source/Vector";
-import OSM from "ol/source/OSM";
+import ClusterSource from "ol/source/Cluster";
 import XYZ from "ol/source/XYZ";
+import OSM from "ol/source/OSM";
 import GeoJSON from "ol/format/GeoJSON";
 import Feature from "ol/Feature";
 import Point from "ol/geom/Point";
-import { fromLonLat } from "ol/proj";
+import { fromLonLat, toLonLat } from "ol/proj";
+import { boundingExtent, createEmpty, extend as extendExtent } from "ol/extent";
 import { Circle, Fill, RegularShape, Stroke, Style, Text } from "ol/style";
-import { defaults as defaultControls } from "ol/control/defaults";
+import { Attribution, MousePosition, ScaleLine, Zoom } from "ol/control";
 import type { FeatureLike } from "ol/Feature";
+import type { Coordinate } from "ol/coordinate";
 
 export interface Pressure { id: number; kind: string; severity: number; lon: number; lat: number; observed_at: string; area_name: string | null; validation_status: string }
 
-export interface MapLayers { areas: boolean; chimps: boolean; wildlife: boolean; pressures: boolean; imagery: boolean }
+export type Basemap = "light" | "streets" | "satellite" | "terrain";
+export type RecordDisplay = "clusters" | "points" | "heatmap";
+export interface MapLayers { areas: boolean; chimps: boolean; wildlife: boolean; pressures: boolean; imagery?: boolean }
+
+export const BASEMAPS: Record<Basemap, { label: string; url: string; attribution: string; maxZoom: number }> = {
+  // Esri Light Gray Canvas: clean, label-light, no API key required.
+  // (CARTO raster tiles have required an API key since September 2026.)
+  light: {
+    label: "Light", maxZoom: 16,
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+    attribution: "Tiles © Esri — Esri, HERE, Garmin, © OpenStreetMap contributors, and the GIS user community",
+  },
+  streets: { label: "Streets", maxZoom: 19, url: "", attribution: "" },
+  satellite: {
+    label: "Satellite", maxZoom: 18,
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    attribution: "Imagery © Esri, Maxar, Earthstar Geographics",
+  },
+  terrain: {
+    label: "Terrain", maxZoom: 17,
+    url: "https://{a-c}.tile.opentopomap.org/{z}/{x}/{y}.png",
+    attribution: '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>, SRTM | © <a href="https://opentopomap.org" target="_blank" rel="noopener">OpenTopoMap</a> (CC-BY-SA)',
+  },
+};
+
+export interface MapHandle {
+  zoomToAll: () => void;
+  zoomToArea: (id: number) => void;
+  locate: () => Promise<void>;
+}
 
 interface Props {
   areas?: GeoJSON.FeatureCollection | null;
   observations?: GeoJSON.FeatureCollection | null;
   pressures?: Pressure[] | null;
   layers?: Partial<MapLayers>;
+  basemap?: Basemap;
+  display?: RecordDisplay;
+  selectedAreaId?: number | null;
   onAreaClick?: (id: number) => void;
   focusAreaId?: number;
-  height?: string;
+  showScale?: boolean;
+  showCoordinates?: boolean;
 }
 
 const css = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -35,129 +72,241 @@ const alpha = (hex: string, a: number) => {
   const n = parseInt(h.length === 3 ? h.split("").map((c) => c + c).join("") : h, 16);
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
 };
+const PAD = [48, 48, 48, 48];
 
-export default function MapView({ areas, observations, pressures, layers = {}, onAreaClick, focusAreaId }: Props) {
+const MapView = forwardRef<MapHandle, Props>(function MapView(
+  { areas, observations, pressures, layers = {}, basemap = "light", display = "clusters", selectedAreaId, onAreaClick,
+    focusAreaId, showScale = true, showCoordinates = false }, ref) {
   const el = useRef<HTMLDivElement>(null);
   const mapRef = useRef<OLMap | null>(null);
-  const srcs = useRef({ areas: new VectorSource(), obs: new VectorSource(), press: new VectorSource() });
-  const lyr = useRef<Record<string, TileLayer | VectorLayer>>({});
+  const areaSrc = useRef(new VectorSource());
+  const obsSrc = useRef(new VectorSource());
+  const pressSrc = useRef(new VectorSource());
+  const youSrc = useRef(new VectorSource());
+  const L = useRef<Record<string, TileLayer | VectorLayer | HeatmapLayer>>({});
   const [pop, setPop] = useState<{ x: number; y: number; html: React.ReactNode } | null>(null);
   const clickRef = useRef(onAreaClick);
   const fitRef = useRef<number[] | null>(null);
+  const selRef = useRef<number | null | undefined>(selectedAreaId);
   clickRef.current = onAreaClick;
+  selRef.current = selectedAreaId;
+
+  useImperativeHandle(ref, () => ({
+    zoomToAll: () => {
+      const ext = areaSrc.current.getExtent();
+      if (ext && mapRef.current && areaSrc.current.getFeatures().length) {
+        fitRef.current = ext;
+        mapRef.current.getView().fit(ext, { padding: PAD, maxZoom: 11, duration: 400 });
+      }
+    },
+    zoomToArea: (id: number) => {
+      const f = areaSrc.current.getFeatures().find((x) => Number(x.get("id")) === id);
+      const ext = f?.getGeometry()?.getExtent();
+      if (ext && mapRef.current) {
+        fitRef.current = ext;  // keep this target if the panel layout resizes the map
+        mapRef.current.getView().fit(ext, { padding: PAD, maxZoom: 12, duration: 400 });
+      }
+    },
+    locate: () => new Promise((resolve, reject) => {
+      if (!navigator.geolocation) { reject(new Error("This device can't share its location")); return; }
+      navigator.geolocation.getCurrentPosition((p) => {
+        const c = fromLonLat([p.coords.longitude, p.coords.latitude]);
+        youSrc.current.clear();
+        youSrc.current.addFeature(new Feature({ geometry: new Point(c), you: true }));
+        mapRef.current?.getView().animate({ center: c, zoom: 12, duration: 500 });
+        resolve();
+      }, () => reject(new Error("Location permission was denied")), { enableHighAccuracy: true, timeout: 15000 });
+    }),
+  }));
 
   useEffect(() => {
     if (!el.current) return;
     const levelColor = (lv?: string) => (lv === "high" ? css("--high") : lv === "medium" ? css("--medium") : lv === "low" ? css("--low") : css("--ink-3"));
-    const areaStyle = (f: FeatureLike) => {
+    const areaStyle = (f: FeatureLike, res: number) => {
       const c = levelColor(f.get("risk_level"));
+      const selected = selRef.current != null && Number(f.get("id")) === selRef.current;
+      void res;
       return new Style({
-        fill: new Fill({ color: alpha(c, 0.16) }),
-        stroke: new Stroke({ color: c, width: 2 }),
-        text: new Text({
-          text: String(f.get("name") ?? "").replace(/ (National Park|Forest Reserve)$/, ""), font: `600 12px ${css("--font")}`,
-          fill: new Fill({ color: css("--ink") }), stroke: new Stroke({ color: css("--surface"), width: 3 }), overflow: true,
-        }),
+        fill: new Fill({ color: alpha(c, selected ? 0.28 : 0.14) }),
+        stroke: new Stroke({ color: c, width: selected ? 3.5 : 2 }),
       });
     };
-    const chimp = new Style({ image: new Circle({ radius: 4, fill: new Fill({ color: css("--teal") }), stroke: new Stroke({ color: css("--surface"), width: 1.5 }) }) });
-    const chimpGen = new Style({ image: new RegularShape({ points: 4, radius: 7, angle: Math.PI / 4, fill: new Fill({ color: alpha(css("--teal"), 0.25) }), stroke: new Stroke({ color: css("--teal"), width: 1.5 }) }) });
-    const wildlife = new Style({ image: new Circle({ radius: 3, fill: new Fill({ color: css("--ink-2") }), stroke: new Stroke({ color: css("--surface"), width: 1 }) }) });
-    const obsStyle = (f: FeatureLike) => (String(f.get("species")).startsWith("Pan ") ? (f.get("generalised") ? chimpGen : chimp) : wildlife);
+    const labelStyle = (f: FeatureLike, res: number) => res > 900 ? undefined : new Style({
+      text: new Text({
+        text: String(f.get("name") ?? "").replace(/ (National Park|Forest Reserve)$/, ""), font: `650 12px ${css("--font")}`,
+        fill: new Fill({ color: "#14281f" }), stroke: new Stroke({ color: "rgba(255,255,255,.95)", width: 4 }),
+        overflow: true, offsetY: -2, padding: [2, 4, 2, 4],
+      }),
+    });
+    const teal = css("--teal"), ink2 = css("--ink-2");
+    const single = (f: FeatureLike) => {
+      if (!String(f.get("species")).startsWith("Pan ")) {
+        return new Style({ image: new Circle({ radius: 3.5, fill: new Fill({ color: ink2 }), stroke: new Stroke({ color: "#fff", width: 1 }) }) });
+      }
+      return f.get("generalised")
+        ? new Style({ image: new RegularShape({ points: 4, radius: 7, angle: Math.PI / 4, fill: new Fill({ color: alpha(teal, 0.22) }), stroke: new Stroke({ color: teal, width: 1.5 }) }) })
+        : new Style({ image: new Circle({ radius: 4.5, fill: new Fill({ color: teal }), stroke: new Stroke({ color: "#fff", width: 1.5 }) }) });
+    };
+    const clusterCache = new Map<number, Style>();
+    const clusterStyle = (f: FeatureLike) => {
+      const members = f.get("features") as Feature[];
+      if (members.length === 1) return single(members[0]);
+      const n = members.length;
+      const key = n > 99 ? 100 : n;
+      if (!clusterCache.has(key)) {
+        const r = Math.min(26, 11 + Math.log2(n) * 3);
+        clusterCache.set(key, new Style({
+          image: new Circle({ radius: r, fill: new Fill({ color: alpha(teal, 0.88) }), stroke: new Stroke({ color: alpha("#ffffff", 0.95), width: 3 }) }),
+          text: new Text({ text: n > 999 ? "999+" : String(n), font: `700 11.5px ${css("--font")}`, fill: new Fill({ color: "#fff" }) }),
+        }));
+      }
+      return clusterCache.get(key)!;
+    };
     const pressStyle = (f: FeatureLike) => new Style({
-      image: new RegularShape({ points: 3, radius: 5 + f.get("severity"), fill: new Fill({ color: css("--high") }), stroke: new Stroke({ color: css("--surface"), width: 1.5 }) }),
+      image: new RegularShape({ points: 3, radius: 5 + Number(f.get("severity")), fill: new Fill({ color: css("--high") }), stroke: new Stroke({ color: "#fff", width: 1.5 }) }),
     });
+    const youStyle = new Style({ image: new Circle({ radius: 7, fill: new Fill({ color: "#2b7de9" }), stroke: new Stroke({ color: "#fff", width: 3 }) }) });
 
-    lyr.current.osm = new TileLayer({ source: new OSM(), className: "ol-osm" });
-    lyr.current.imagery = new TileLayer({
-      source: new XYZ({ url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", attributions: "Imagery © Esri", maxZoom: 18 }),
-      visible: false,
+    L.current.light = new TileLayer({ source: new XYZ({ url: BASEMAPS.light.url, attributions: BASEMAPS.light.attribution, maxZoom: 16 }) });
+    L.current.lightLabels = new TileLayer({
+      source: new XYZ({ url: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}", maxZoom: 16 }),
+      zIndex: 0,
     });
-    lyr.current.areas = new VectorLayer({ source: srcs.current.areas, style: areaStyle, declutter: true });
-    lyr.current.areas.setZIndex(1);
-    lyr.current.obs = new VectorLayer({ source: srcs.current.obs, style: obsStyle });
-    lyr.current.obs.setZIndex(2);
-    lyr.current.press = new VectorLayer({ source: srcs.current.press, style: pressStyle });
-    lyr.current.press.setZIndex(3);
+    L.current.streets = new TileLayer({ source: new OSM(), visible: false });
+    L.current.satellite = new TileLayer({ source: new XYZ({ url: BASEMAPS.satellite.url, attributions: BASEMAPS.satellite.attribution, maxZoom: 18 }), visible: false });
+    L.current.terrain = new TileLayer({ source: new XYZ({ url: BASEMAPS.terrain.url, attributions: BASEMAPS.terrain.attribution, maxZoom: 17 }), visible: false });
+    L.current.areas = new VectorLayer({ source: areaSrc.current, style: areaStyle, zIndex: 1 });
+    L.current.labels = new VectorLayer({ source: areaSrc.current, style: labelStyle, declutter: true, zIndex: 6 });
+    L.current.points = new VectorLayer({ source: obsSrc.current, style: single, zIndex: 2, visible: false });
+    L.current.clusters = new VectorLayer({ source: new ClusterSource({ source: obsSrc.current, distance: 42, minDistance: 16 }), style: clusterStyle, zIndex: 2 });
+    L.current.heat = new HeatmapLayer({
+      source: obsSrc.current, blur: 22, radius: 12, zIndex: 2, visible: false,
+      weight: (f) => Math.min(1, 0.25 + Number(f.get("count") || 1) * 0.1),
+      gradient: ["rgba(30,107,117,0)", "#7fc4c0", "#2f9e8f", "#e9c46a", "#e76f51", "#b83246"],
+    });
+    L.current.press = new VectorLayer({ source: pressSrc.current, style: pressStyle, zIndex: 3 });
+    L.current.you = new VectorLayer({ source: youSrc.current, style: youStyle, zIndex: 4 });
+
+    const controls = [new Zoom({ className: "ol-zoom cw-zoom" }), new Attribution({ collapsible: true, collapsed: true })];
+    if (showScale) controls.push(new ScaleLine({ units: "metric", minWidth: 80, className: "cw-scale" }) as never);
+    if (showCoordinates) {
+      controls.push(new MousePosition({
+        className: "cw-coords", placeholder: "Move over the map for coordinates",
+        coordinateFormat: (c?: Coordinate) => {
+          if (!c) return "";
+          const [lon, lat] = toLonLat(c);
+          return `${Math.abs(lat).toFixed(4)}° ${lat >= 0 ? "N" : "S"}, ${Math.abs(lon).toFixed(4)}° ${lon >= 0 ? "E" : "W"}`;
+        },
+      }) as never);
+    }
 
     const map = new OLMap({
       target: el.current,
-      layers: [lyr.current.osm, lyr.current.imagery, lyr.current.areas, lyr.current.obs, lyr.current.press],
-      view: new View({ center: fromLonLat([-11.8, 8.55]), zoom: 7.6, minZoom: 5, maxZoom: 17 }),
-      controls: defaultControls({ rotate: false, attributionOptions: { collapsible: true } }),
+      layers: [L.current.light, L.current.lightLabels, L.current.streets, L.current.satellite, L.current.terrain, L.current.areas,
+        L.current.heat, L.current.points, L.current.clusters, L.current.press, L.current.you, L.current.labels],
+      view: new View({ center: fromLonLat([-11.8, 8.55]), zoom: 7.6, minZoom: 5, maxZoom: 18 }),
+      controls,
     });
+
     map.on("pointermove", (e) => {
       if (e.dragging) return;
-      const f = map.forEachFeatureAtPixel(e.pixel, (ft) => ft, { hitTolerance: 4 }) as Feature | undefined;
+      const hit = map.forEachFeatureAtPixel(e.pixel, (ft, layer) => [ft, layer] as const, { hitTolerance: 4 });
       const tgt = map.getTargetElement();
-      if (tgt) tgt.style.cursor = f && f.get("risk_level") !== undefined ? "pointer" : "";
-      if (!f) { setPop(null); return; }
-      const p = f.getProperties();
+      if (!hit) { setPop(null); if (tgt) tgt.style.cursor = ""; return; }
+      const [f, layer] = hit;
+      if (layer === L.current.labels) { setPop(null); return; }
+      if (tgt) tgt.style.cursor = layer === L.current.areas || layer === L.current.clusters ? "pointer" : "";
+      let p = f.getProperties();
       let html: React.ReactNode;
-      if (p.kind) html = <><b>{p.kind[0].toUpperCase() + p.kind.slice(1)} pressure</b><div className="muted">Severity {p.severity} · {new Date(p.observed_at).toLocaleDateString("en-GB")}</div><div className="muted">{p.validation_status}</div></>;
-      else if (p.species) html = <><b>{p.common_name || p.species}</b><div className="muted">{p.evidence_type.replace(/_/g, " ")} · {p.count} · {new Date(p.observed_at).toLocaleDateString("en-GB")}</div>{p.generalised && <div className="muted">Location generalised to ~{p.precision_km} km</div>}</>;
-      else html = <><b>{p.name}</b><div className="muted">{p.designation} · {p.district}</div><div>Overall concern: {p.risk_level ?? "not assessed"}</div></>;
+      if (layer === L.current.clusters) {
+        const members = p.features as Feature[];
+        if (members.length > 1) {
+          const chimps = members.filter((m) => String(m.get("species")).startsWith("Pan ")).length;
+          html = <><b>{members.length} records</b><div className="muted">{chimps} chimpanzee · {members.length - chimps} other wildlife</div><div className="muted">Click to zoom in</div></>;
+          setPop({ x: e.pixel[0], y: e.pixel[1], html });
+          return;
+        }
+        p = members[0].getProperties();
+      }
+      if (p.you) html = <b>Your location</b>;
+      else if (p.kind) html = <><b>{String(p.kind)[0].toUpperCase() + String(p.kind).slice(1)} pressure</b><div className="muted">Severity {p.severity} of 3 · {new Date(p.observed_at).toLocaleDateString("en-GB")}</div><div className="muted">{p.area_name ?? "Outside pilot areas"} · {p.validation_status}</div></>;
+      else if (p.species) html = <><b>{p.common_name || p.species}</b><div className="muted">{String(p.evidence_type).replace(/_/g, " ")} · {p.count} · {new Date(p.observed_at).toLocaleDateString("en-GB")}</div>{p.generalised && <div className="muted">Location generalised to ~{p.precision_km} km</div>}</>;
+      else html = <><b>{p.name}</b><div className="muted">{p.designation} · {p.district}</div><div>Overall concern: {p.risk_level ?? "not assessed"}</div><div className="muted">Click for details</div></>;
       setPop({ x: e.pixel[0], y: e.pixel[1], html });
     });
     map.on("click", (e) => {
-      const f = map.forEachFeatureAtPixel(e.pixel, (ft) => ft, { layerFilter: (l) => l === lyr.current.areas }) as Feature | undefined;
-      if (f && clickRef.current) clickRef.current(Number(f.get("id")));
+      const hit = map.forEachFeatureAtPixel(e.pixel, (ft, layer) => [ft, layer] as const, { hitTolerance: 4 });
+      if (!hit) return;
+      const [f, layer] = hit;
+      if (layer === L.current.clusters) {
+        const members = f.get("features") as Feature[];
+        if (members.length > 1) {
+          const ext = createEmpty();
+          members.forEach((m) => extendExtent(ext, boundingExtent([(m.getGeometry() as Point).getCoordinates()])));
+          map.getView().fit(ext, { padding: [80, 80, 80, 80], maxZoom: 14, duration: 400 });
+          return;
+        }
+      }
+      const area = map.forEachFeatureAtPixel(e.pixel, (ft) => ft, { layerFilter: (l) => l === L.current.areas });
+      if (area && clickRef.current) clickRef.current(Number(area.get("id")));
     });
     mapRef.current = map;
-    // Re-fit to the data when the panel resizes, until the user pans or zooms themselves.
+
     let userMoved = false;
     map.on("pointerdrag", () => { userMoved = true; });
     el.current.addEventListener("wheel", () => { userMoved = true; }, { passive: true });
     const ro = new ResizeObserver(() => {
       map.updateSize();
-      const ext = fitRef.current;
-      if (!userMoved && ext) map.getView().fit(ext, { padding: [40, 40, 40, 40], maxZoom: 11 });
+      if (!userMoved && fitRef.current) map.getView().fit(fitRef.current, { padding: PAD, maxZoom: 12 });
     });
     ro.observe(el.current);
     return () => { ro.disconnect(); map.setTarget(undefined); };
-  }, []);
+  }, [showScale, showCoordinates]);
 
   useEffect(() => {
-    const s = srcs.current.areas;
+    const s = areaSrc.current;
     s.clear();
     if (!areas) return;
     s.addFeatures(new GeoJSON().readFeatures(areas, { featureProjection: "EPSG:3857" }));
     const map = mapRef.current;
     if (!map || !s.getFeatures().length) return;
-    const target = focusAreaId ? s.getFeatures().find((f) => f.get("id") === focusAreaId) : null;
+    const target = focusAreaId ? s.getFeatures().find((f) => Number(f.get("id")) === focusAreaId) : null;
     const extent = target?.getGeometry()?.getExtent() ?? s.getExtent();
     if (!extent) return;
     fitRef.current = extent;
-    map.getView().fit(extent, { padding: [40, 40, 40, 40], maxZoom: 11 });
+    map.getView().fit(extent, { padding: PAD, maxZoom: 11 });
   }, [areas, focusAreaId]);
 
+  // Observations, filtered by the chimp / wildlife toggles
   useEffect(() => {
-    const s = srcs.current.obs;
+    const s = obsSrc.current;
     s.clear();
-    if (observations) s.addFeatures(new GeoJSON().readFeatures(observations, { featureProjection: "EPSG:3857" }));
-  }, [observations]);
+    if (!observations) return;
+    const showChimp = layers.chimps !== false, showWild = layers.wildlife !== false;
+    const feats = new GeoJSON().readFeatures(observations, { featureProjection: "EPSG:3857" })
+      .filter((f) => (String(f.get("species")).startsWith("Pan ") ? showChimp : showWild));
+    s.addFeatures(feats);
+  }, [observations, layers.chimps, layers.wildlife]);
 
   useEffect(() => {
-    const s = srcs.current.press;
+    const s = pressSrc.current;
     s.clear();
-    (pressures || []).forEach((p) => {
-      const f = new Feature({ geometry: new Point(fromLonLat([p.lon, p.lat])), ...p });
-      s.addFeature(f);
-    });
+    (pressures || []).forEach((p) => s.addFeature(new Feature({ geometry: new Point(fromLonLat([p.lon, p.lat])), ...p })));
   }, [pressures]);
 
   useEffect(() => {
-    const L = lyr.current;
-    L.areas?.setVisible(layers.areas !== false);
-    L.press?.setVisible(layers.pressures !== false);
-    L.imagery?.setVisible(!!layers.imagery);
-    L.osm?.setVisible(!layers.imagery);
-    const showChimp = layers.chimps !== false, showWild = layers.wildlife !== false;
-    srcs.current.obs.getFeatures().forEach((f) => {
-      const isChimp = String(f.get("species")).startsWith("Pan ");
-      f.setStyle((isChimp ? showChimp : showWild) ? undefined : new Style({}));
-    });
-  }, [layers, observations]);
+    const bm: Basemap = layers.imagery ? "satellite" : basemap;
+    (["light", "streets", "satellite", "terrain"] as Basemap[]).forEach((k) => L.current[k]?.setVisible(k === bm));
+    L.current.lightLabels?.setVisible(bm === "light");
+    L.current.areas?.setVisible(layers.areas !== false);
+    L.current.labels?.setVisible(layers.areas !== false);
+    L.current.press?.setVisible(layers.pressures !== false);
+    L.current.clusters?.setVisible(display === "clusters");
+    L.current.points?.setVisible(display === "points");
+    L.current.heat?.setVisible(display === "heatmap");
+  }, [layers.areas, layers.pressures, layers.imagery, basemap, display]);
+
+  useEffect(() => { (L.current.areas as VectorLayer | undefined)?.changed(); }, [selectedAreaId]);
 
   return (
     <>
@@ -165,17 +314,22 @@ export default function MapView({ areas, observations, pressures, layers = {}, o
       {pop && <div className="map-pop" style={{ left: pop.x, top: pop.y }}>{pop.html}</div>}
     </>
   );
-}
+});
 
-export function MapLegend({ generalisedKm }: { generalisedKm?: number }) {
+export default MapView;
+
+export function MapLegend({ generalisedKm, compact = false }: { generalisedKm?: number; compact?: boolean }) {
   return (
-    <div className="map-legend">
-      <div><span className="sw" style={{ borderColor: "var(--high)", background: "var(--high-soft)" }} />High overall concern</div>
-      <div><span className="sw" style={{ borderColor: "var(--medium)", background: "var(--medium-soft)" }} />Medium overall concern</div>
-      <div><span className="sw" style={{ borderColor: "var(--low)", background: "var(--low-soft)" }} />Low overall concern</div>
-      <div><svg width="12" height="12" style={{ marginRight: 6, verticalAlign: -2 }}><circle cx="6" cy="6" r="4" fill="var(--teal)" /></svg>Chimpanzee record</div>
-      <div><svg width="12" height="12" style={{ marginRight: 6, verticalAlign: -2 }}><rect x="2" y="2" width="8" height="8" transform="rotate(45 6 6)" fill="none" stroke="var(--teal)" strokeWidth="1.5" /></svg>Generalised to ~{generalisedKm ?? 11} km</div>
-      <div><svg width="12" height="12" style={{ marginRight: 6, verticalAlign: -2 }}><path d="M6 1l5 10H1z" fill="var(--high)" /></svg>Human pressure report</div>
+    <div className={`map-legend ${compact ? "compact" : ""}`}>
+      <div className="lg-title">Overall concern</div>
+      <div className="lg-row">
+        <span><i className="sw" style={{ borderColor: "var(--high)", background: "var(--high-soft)" }} />High</span>
+        <span><i className="sw" style={{ borderColor: "var(--medium)", background: "var(--medium-soft)" }} />Medium</span>
+        <span><i className="sw" style={{ borderColor: "var(--low)", background: "var(--low-soft)" }} />Low</span>
+      </div>
+      <div><svg width="12" height="12"><circle cx="6" cy="6" r="4.5" fill="var(--teal)" /></svg>Chimpanzee record</div>
+      <div><svg width="12" height="12"><rect x="2" y="2" width="8" height="8" transform="rotate(45 6 6)" fill="none" stroke="var(--teal)" strokeWidth="1.5" /></svg>Generalised to ~{generalisedKm ?? 11} km</div>
+      <div><svg width="12" height="12"><path d="M6 1l5 10H1z" fill="var(--high)" /></svg>Human pressure report</div>
     </div>
   );
 }

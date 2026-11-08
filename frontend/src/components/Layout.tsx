@@ -42,17 +42,17 @@ export default function Layout() {
         {link("/", "dashboard", "Overview")}
         {link("/map", "map", "Map")}
         {link("/alerts", "alert", "Alerts", openHigh > 0 ? <span className="count" aria-label={`${openHigh} open high alerts`}>{openHigh}</span> : null)}
-        {can("field_monitor", "analyst") && link("/capture", "field", "Record", outbox > 0 ? <span className="count" style={{ background: "var(--medium)" }}>{outbox}</span> : null)}
-        {link("/observations", "obs", "Records", null, true)}
+        {can("field_monitor", "analyst") && link("/capture", "field", "Add record", outbox > 0 ? <span className="count" style={{ background: "var(--medium)" }}>{outbox}</span> : null)}
+        {link("/observations", "obs", "All records", null, true)}
         {link("/tasks", "tasks", "Field tasks")}
         {link("/ecosystem", "eco", "Ecosystem", null, true)}
         {link("/reports", "report", "Reports", null, true)}
         {can() && link("/admin", "admin", "Admin", pendingUsers > 0 ? <span className="count" style={{ background: "var(--medium)" }} aria-label={`${pendingUsers} access requests`}>{pendingUsers}</span> : null, true)}
         <div className="rail-foot">
-          <div className="who">{user?.full_name}</div>
+          <NavLink to="/profile" className="who" style={{ color: "#fff", textDecoration: "none" }}>{user?.full_name}</NavLink>
           <div>{ROLE_TEXT[user?.role ?? "viewer"]} · {user?.org?.name?.replace(" (demo)", "")}</div>
           <div className={`net ${online ? "" : "off"}`}><i />{online ? "Online" : "Offline — records are saved on this device"}</div>
-          <div><button onClick={logout}>Sign out</button></div>
+          <div className="row" style={{ gap: 14 }}><NavLink to="/profile" style={{ color: "var(--rail-ink)", fontSize: "var(--fs-s)" }}>Profile</NavLink><button onClick={logout}>Sign out</button></div>
         </div>
         <div className="rail-forest"><ForestScene variant="rail" /></div>
       </nav>
@@ -61,7 +61,8 @@ export default function Layout() {
           <img src="/icon.svg" alt="CHIMP-WATCH" />
           <div className="row small">
             <span className={`net ${online ? "" : "off"}`} style={{ marginTop: 0 }}><i />{online ? "Online" : "Offline"}</span>
-            <NavLink to="/observations" className="btn ghost">Records</NavLink>
+            <NavLink to="/observations" className="btn ghost">All records</NavLink>
+            <NavLink to="/profile" className="btn ghost">Profile</NavLink>
             <button className="btn ghost" onClick={logout}>Sign out</button>
           </div>
         </div>

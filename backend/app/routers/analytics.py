@@ -22,7 +22,7 @@ from ..models import (
 )
 from ..schemas import AssessmentOut
 from ..security import can_analyse, get_current_user
-from ..services import gbif, importers, reporting, risk
+from ..services import gbif, importers, notify, reporting, risk
 
 router = APIRouter(prefix="/api", tags=["analytics & reporting"])
 
@@ -37,8 +37,11 @@ def run_analytics(request: Request, area_id: int | None = None, db: Session = De
         ra = risk.assess_area(db, area)
         alerts = risk.generate_alerts(db, ra)
         result = {"assessed": 1, "alerts_created_or_escalated": len(alerts), "levels": {area.name: ra.overall_level.value}}
-    else:
-        result = risk.run_all(db)
+        audit.record(db, user, "run", "risk_assessment", area_id, result, request)
+        db.commit()
+        notify.high_alerts(db, alerts)
+        return result
+    result = risk.run_all(db)
     audit.record(db, user, "run", "risk_assessment", area_id, result, request)
     db.commit()
     return result

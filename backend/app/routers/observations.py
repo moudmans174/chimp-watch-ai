@@ -12,7 +12,7 @@ from .. import audit
 from ..config import get_settings
 from ..db import get_db
 from ..geo import point, visible_location
-from ..models import EvidenceType, Media, Observation, Role, SurveyEffort, User, ValidationStatus
+from ..models import EvidenceType, Media, Observation, ProtectedArea, Role, SurveyEffort, User, ValidationStatus
 from ..schemas import ObservationIn, ObservationOut, SurveyIn, SurveyOut, ValidationIn
 from ..security import can_analyse, can_submit, get_current_user
 from ..services import classifier
@@ -109,12 +109,17 @@ def _create(db: Session, body: ObservationIn, user: User) -> tuple[Observation, 
             if existing.observer_id != user.id:
                 raise HTTPException(409, "client_uuid already used")
             return existing, False
-    data = body.model_dump(exclude={"lat", "lon", "client_uuid", "sensitive"})
+    data = body.model_dump(exclude={"lat", "lon", "client_uuid", "sensitive", "survey_client_uuid"})
+    if body.survey_client_uuid and not body.survey_id:
+        sid = db.scalar(select(SurveyEffort.id).where(SurveyEffort.client_uuid == body.survey_client_uuid))
+        if not sid:
+            raise HTTPException(422, "The survey for this record hasn't been sent yet")
+        data["survey_id"] = sid
     o = Observation(**data, geom=point(body.lat, body.lon), observer_id=user.id, org_id=user.org_id, source="field",
                     sensitive=body.sensitive if body.sensitive is not None else body.species.startswith("Pan "))
     if body.client_uuid:
         o.client_uuid = body.client_uuid
-    if body.survey_id and not db.get(SurveyEffort, body.survey_id):
+    if data.get("survey_id") and not db.get(SurveyEffort, data["survey_id"]):
         raise HTTPException(422, "Unknown survey_id")
     o.area_id = assign_area(db, body.lon, body.lat)
     db.add(o)
@@ -282,18 +287,32 @@ def export_csv(area_id: int | None = None, status: ValidationStatus | None = Non
 
 # ---------- survey effort ----------
 @router.get("/surveys", response_model=list[SurveyOut])
-def list_surveys(area_id: int | None = None, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
-    q = select(SurveyEffort).order_by(SurveyEffort.start_date.desc()).limit(500)
+def list_surveys(area_id: int | None = None, mine: bool = False, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    q = select(SurveyEffort).order_by(SurveyEffort.start_date.desc(), SurveyEffort.id.desc()).limit(500)
     if area_id:
         q = q.where(SurveyEffort.area_id == area_id)
+    if mine:
+        q = q.where(SurveyEffort.created_by == user.id)
     return db.scalars(q).all()
 
 
 @router.post("/surveys", response_model=SurveyOut, status_code=201)
-def create_survey(body: SurveyIn, request: Request, db: Session = Depends(get_db), user: User = Depends(can_submit)):
+def create_survey(body: SurveyIn, request: Request, response: Response, db: Session = Depends(get_db),
+                  user: User = Depends(can_submit)):
+    """Idempotent when client_uuid is given, so the offline app can safely retry."""
+    if body.client_uuid:
+        existing = db.scalar(select(SurveyEffort).where(SurveyEffort.client_uuid == body.client_uuid))
+        if existing:
+            response.status_code = 200
+            return existing
     if body.end_date < body.start_date:
         raise HTTPException(422, "end_date must be on or after start_date")
-    s = SurveyEffort(**body.model_dump(), org_id=user.org_id)
+    if not db.get(ProtectedArea, body.area_id):
+        raise HTTPException(422, "Unknown landscape")
+    if not (body.effort_km or body.effort_trap_days):
+        raise HTTPException(422, "Record the distance walked (km) or camera-trap days")
+    s = SurveyEffort(**body.model_dump(), org_id=user.org_id, created_by=user.id, source="field")
     db.add(s)
     db.flush()
     audit.record(db, user, "create", "survey", s.id, body.model_dump(mode="json"), request)

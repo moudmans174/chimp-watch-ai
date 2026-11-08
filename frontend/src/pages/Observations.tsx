@@ -8,7 +8,29 @@ import { Drawer, Empty, ErrorBox, Loading, StatusChip, toast } from "../componen
 
 const PAGE = 50;
 
-export default function Observations() {
+type Tab = "obs" | "pressures" | "surveys";
+
+export default function Records() {
+  const [tab, setTab] = useState<Tab>(() => (new URLSearchParams(window.location.search).get("tab") as Tab) || "obs");
+  return (
+    <>
+      <header className="page-head">
+        <div>
+          <h1>All records</h1>
+          <p>Everything collected in the field, from camera traps and imports. Only verified records feed the indicators and trends.</p>
+        </div>
+      </header>
+      <div className="tabs" role="tablist">
+        <button role="tab" aria-selected={tab === "obs"} onClick={() => setTab("obs")}>Wildlife observations</button>
+        <button role="tab" aria-selected={tab === "pressures"} onClick={() => setTab("pressures")}>Pressure reports</button>
+        <button role="tab" aria-selected={tab === "surveys"} onClick={() => setTab("surveys")}>Surveys</button>
+      </div>
+      {tab === "obs" ? <ObservationsTab /> : tab === "pressures" ? <PressuresTab /> : <SurveysTab />}
+    </>
+  );
+}
+
+function ObservationsTab() {
   const { can } = useAuth();
   const [status, setStatus] = useState("");
   const [areaId, setAreaId] = useState("");
@@ -27,15 +49,6 @@ export default function Observations() {
 
   return (
     <>
-      <header className="page-head">
-        <div>
-          <h1>Observation records</h1>
-          <p>Field, camera-trap and imported records. Only verified records feed the indicators and trends.</p>
-        </div>
-        <div className="page-actions">
-          <button className="btn" onClick={() => download(`/exports/observations.csv?${areaId ? `area_id=${areaId}` : ""}`, "chimpwatch_observations.csv").catch((e) => toast(e.message))}>Export CSV</button>
-        </div>
-      </header>
       <div className="filters">
         <select className="input" value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Validation status">
           <option value="">Any status</option><option value="pending">Awaiting validation</option><option value="verified">Verified</option><option value="rejected">Rejected</option>
@@ -45,6 +58,7 @@ export default function Observations() {
         </select>
         <input className="input" placeholder="Species name" value={species} onChange={(e) => setSpecies(e.target.value)} aria-label="Species" />
         <label className="row small"><input type="checkbox" checked={mine} onChange={(e) => setMine(e.target.checked)} />My records only</label>
+        <button className="btn" style={{ marginLeft: "auto" }} onClick={() => download(`/exports/observations.csv?${areaId ? `area_id=${areaId}` : ""}`, "chimpwatch_observations.csv").catch((e) => toast(e.message))}>Export CSV</button>
       </div>
       <section className="panel">
         <ErrorBox error={list.error} />
@@ -146,5 +160,105 @@ function ObsDrawer({ obs, onClose, onChange }: { obs: Observation; onClose: () =
         </div>
       )}
     </Drawer>
+  );
+}
+
+// ---------------------------------------------------------------- pressure reports
+interface PressureRow { id: number; area_id: number | null; area_name: string | null; kind: string; severity: number; observed_at: string; lon: number; lat: number; description: string | null; source: string; validation_status: "pending" | "verified" | "rejected" }
+
+function PressuresTab() {
+  const { can } = useAuth();
+  const [days, setDays] = useState("365");
+  const [kind, setKind] = useState("");
+  const [status, setStatus] = useState("");
+  const list = useApi<PressureRow[]>(`/pressures?days=${days}${kind ? `&kind=${kind}` : ""}`);
+  const rows = (list.data ?? []).filter((p) => !status || p.validation_status === status);
+  const kinds = [...new Set((list.data ?? []).map((p) => p.kind))].sort();
+  const decide = async (p: PressureRow, s: "verified" | "rejected") => {
+    try {
+      await api(`/pressures/${p.id}/validate`, { method: "POST", json: { status: s, note: null } });
+      toast(s === "verified" ? "Pressure report verified" : "Pressure report rejected");
+      list.reload();
+    } catch (e) { toast((e as Error).message); }
+  };
+  return (
+    <>
+      <div className="filters">
+        <select className="input" value={days} onChange={(e) => setDays(e.target.value)} aria-label="Period">
+          <option value="90">Last 90 days</option><option value="365">Last 12 months</option><option value="1095">Last 3 years</option>
+        </select>
+        <select className="input" value={kind} onChange={(e) => setKind(e.target.value)} aria-label="Type">
+          <option value="">All types</option>{kinds.map((k) => <option key={k} value={k}>{humanize(k)}</option>)}
+        </select>
+        <select className="input" value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Status">
+          <option value="">Any status</option><option value="pending">Awaiting validation</option><option value="verified">Verified</option><option value="rejected">Rejected</option>
+        </select>
+      </div>
+      <section className="panel">
+        <ErrorBox error={list.error} />
+        {list.loading && !list.data ? <Loading /> : rows.length ? (
+          <div className="table-wrap"><table className="data">
+            <thead><tr><th>Reported</th><th>Type</th><th className="num">Severity</th><th>Landscape</th><th>Location</th><th>Description</th><th>Status</th>{can("analyst") && <th></th>}</tr></thead>
+            <tbody>{rows.map((p) => (
+              <tr key={p.id}>
+                <td>{fmtDate(p.observed_at)}</td>
+                <td>{humanize(p.kind)}</td>
+                <td className="num">{["", "Minor", "Moderate", "Severe"][p.severity]}</td>
+                <td>{p.area_name ?? <span className="muted">Outside pilot areas</span>}</td>
+                <td className="small">{p.lat.toFixed(4)}, {p.lon.toFixed(4)}</td>
+                <td className="small" style={{ maxWidth: 280 }}>{p.description ?? "—"}</td>
+                <td><StatusChip status={p.validation_status} /></td>
+                {can("analyst") && <td>{p.validation_status === "pending" && (
+                  <div className="row" style={{ flexWrap: "nowrap" }}>
+                    <button className="btn" onClick={() => decide(p, "verified")}>Verify</button>
+                    <button className="btn ghost" onClick={() => decide(p, "rejected")}>Reject</button>
+                  </div>)}</td>}
+              </tr>
+            ))}</tbody>
+          </table></div>
+        ) : <Empty title="No pressure reports match these filters">Rangers add them from Add record → Human pressure.</Empty>}
+      </section>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------- surveys
+interface SurveyRow { id: number; area_id: number; method: string; start_date: string; end_date: string; effort_km: number | null; effort_trap_days: number | null; team: string | null; source: string; notes?: string | null }
+
+function SurveysTab() {
+  const [areaId, setAreaId] = useState("");
+  const [mine, setMine] = useState(false);
+  const areas = useApi<Area[]>("/areas");
+  const list = useApi<SurveyRow[]>(`/surveys?${areaId ? `area_id=${areaId}&` : ""}${mine ? "mine=true" : ""}`);
+  const names = Object.fromEntries((areas.data ?? []).map((a) => [a.id, a.name]));
+  const totalKm = (list.data ?? []).reduce((t, s) => t + (s.effort_km ?? 0), 0);
+  return (
+    <>
+      <div className="filters">
+        <select className="input" value={areaId} onChange={(e) => setAreaId(e.target.value)} aria-label="Landscape">
+          <option value="">All landscapes</option>{areas.data?.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+        </select>
+        <label className="row small"><input type="checkbox" checked={mine} onChange={(e) => setMine(e.target.checked)} />My surveys only</label>
+        {list.data && <span className="small muted" style={{ marginLeft: "auto" }}>{list.data.length} surveys · {totalKm.toLocaleString("en-GB", { maximumFractionDigits: 1 })} km walked</span>}
+      </div>
+      <section className="panel">
+        <ErrorBox error={list.error} />
+        {list.loading && !list.data ? <Loading /> : list.data?.length ? (
+          <div className="table-wrap"><table className="data">
+            <thead><tr><th>Dates</th><th>Landscape</th><th>Method</th><th className="num">Effort</th><th>Team</th><th>Source</th></tr></thead>
+            <tbody>{list.data.map((s) => (
+              <tr key={s.id}>
+                <td>{fmtDate(s.start_date)}{s.end_date !== s.start_date ? ` – ${fmtDate(s.end_date)}` : ""}</td>
+                <td>{names[s.area_id] ?? `#${s.area_id}`}</td>
+                <td>{humanize(s.method)}</td>
+                <td className="num">{s.effort_km != null ? `${s.effort_km} km` : s.effort_trap_days != null ? `${s.effort_trap_days} trap-days` : "—"}</td>
+                <td className="small">{s.team ?? "—"}{s.notes ? <div className="xs muted">{s.notes}</div> : null}</td>
+                <td>{humanize(s.source)}</td>
+              </tr>
+            ))}</tbody>
+          </table></div>
+        ) : <Empty title="No surveys yet">Rangers start one from Add record → Start a survey.</Empty>}
+      </section>
+    </>
   );
 }

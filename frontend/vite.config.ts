@@ -27,12 +27,12 @@ export default defineConfig({
         navigateFallbackDenylist: [/^\/api\//],
         runtimeCaching: [
           {
-            urlPattern: ({ url }) => url.hostname.endsWith("tile.openstreetmap.org") || url.hostname.includes("arcgisonline"),
+            urlPattern: ({ url }) => /tile\.openstreetmap\.org$|basemaps\.cartocdn\.com$|tile\.opentopomap\.org$|arcgisonline\.com$/.test(url.hostname),
             handler: "CacheFirst",
             options: { cacheName: "map-tiles", expiration: { maxEntries: 3000, maxAgeSeconds: 60 * 60 * 24 * 30 } },
           },
           {
-            urlPattern: ({ url }) => url.pathname === "/api/areas.geojson" || url.pathname === "/api/meta" || url.pathname === "/api/areas",
+            urlPattern: ({ url }) => url.pathname === "/api/areas.geojson" || url.pathname === "/api/meta" || url.pathname === "/api/areas" || url.pathname === "/api/auth/me",
             handler: "NetworkFirst",
             options: { cacheName: "reference-data", networkTimeoutSeconds: 4 },
           },

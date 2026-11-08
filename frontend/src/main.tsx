@@ -9,6 +9,8 @@ import Layout from "./components/Layout";
 import { AuthPage } from "./pages/Login";
 import Landing from "./pages/Landing";
 import AuthCallback from "./pages/AuthCallback";
+import Profile from "./pages/Profile";
+import { ForgotPassword, ResetPassword } from "./pages/PasswordReset";
 import Dashboard from "./pages/Dashboard";
 import MapPage from "./pages/MapPage";
 import Alerts from "./pages/Alerts";
@@ -38,6 +40,8 @@ function App() {
       <Route path="/login" element={<AuthPage mode="signin" />} />
       <Route path="/signup" element={<AuthPage mode="signup" />} />
       <Route path="/auth/callback" element={<AuthCallback />} />
+      <Route path="/forgot-password" element={<ForgotPassword />} />
+      <Route path="/reset-password" element={<ResetPassword />} />
       <Route element={<Guard><Layout /></Guard>}>
         <Route index element={<Dashboard />} />
         <Route path="map" element={<MapPage />} />
@@ -48,6 +52,7 @@ function App() {
         <Route path="tasks" element={<Tasks />} />
         <Route path="ecosystem" element={<Ecosystem />} />
         <Route path="reports" element={<Reports />} />
+        <Route path="profile" element={<Profile />} />
         <Route path="admin" element={<Guard roles={[]}><Admin /></Guard>} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

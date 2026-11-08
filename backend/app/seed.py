@@ -253,7 +253,7 @@ def seed(today: date | None = None) -> bool:
         db.commit()
 
         # --- run early warning and seed follow-up tasks
-        risk.run_all(db)
+        risk.run_all(db, notify_users=False)
         top = db.scalars(select(Alert).order_by(Alert.score.desc().nulls_last()).limit(2)).all()
         for a in top:
             db.add(FieldTask(alert_id=a.id, area_id=a.area_id, title=f"Field verification: {a.area.name}",

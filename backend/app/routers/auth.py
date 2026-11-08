@@ -1,4 +1,6 @@
 import json
+
+import jwt
 import secrets as _secrets
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlencode
@@ -15,8 +17,8 @@ from ..config import get_settings
 from ..db import get_db
 from ..models import Organisation, Role, User, UserIdentity
 from ..ratelimit import limiter
-from ..schemas import PasswordChange, SignupIn, Token, UserOut
-from ..services import oauth
+from ..schemas import AdminUserOut, ForgotIn, PasswordChange, ProfileUpdate, ResetIn, SignupIn, Token, UserOut
+from ..services import notify, oauth
 from ..security import (
     LOCKOUT_MINUTES,
     MAX_FAILED_LOGINS,
@@ -59,8 +61,21 @@ def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Ses
     return Token(access_token=create_access_token(user), user=UserOut.model_validate(user))
 
 
-@router.get("/me", response_model=UserOut)
+@router.get("/me", response_model=AdminUserOut)
 def me(user: User = Depends(get_current_user)):
+    return user
+
+
+@router.patch("/me", response_model=AdminUserOut)
+def update_me(body: ProfileUpdate, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    changes = body.model_dump(exclude_unset=True)
+    if "full_name" in changes and changes["full_name"]:
+        user.full_name = changes["full_name"].strip()
+    if "phone" in changes:
+        user.phone = (changes["phone"] or "").strip() or None
+    audit.record(db, user, "profile_updated", "user", user.id, {k: ("***" if k == "phone" else v) for k, v in changes.items()}, request)
+    db.commit()
+    db.refresh(user)
     return user
 
 
@@ -73,10 +88,15 @@ def change_password(body: PasswordChange, request: Request, user: User = Depends
     user.hashed_password = hash_password(body.new_password)
     audit.record(db, user, "password_changed", "user", user.id, request=request)
     db.commit()
+    notify.password_changed(user)
 
 
 # ============================================================================ social sign-in
 COOKIE = "cw_oauth"
+
+
+def oauth_name(p: str) -> str:
+    return {"google": "Google", "apple": "Apple", "github": "GitHub"}.get(p, p)
 
 
 @router.get("/providers")
@@ -150,6 +170,7 @@ def _complete(db: Session, request: Request, flow: dict, profile: oauth.Profile)
         db.add(UserIdentity(user_id=user.id, provider=profile.provider, subject=profile.subject, email=profile.email))
         audit.record(db, user, "signup_requested", "user", user.id, {"provider": profile.provider, "email": user.email}, request)
         created = True
+        notify.access_requested(db, user, oauth_name(profile.provider))
 
     if ident:
         ident.last_used_at = now
@@ -246,4 +267,57 @@ def signup(body: SignupIn, request: Request, db: Session = Depends(get_db)):
                                                            "requested_role": body.requested_role.value,
                                                            "requested_org": body.organisation}, request)
     db.commit()
+    notify.access_requested(db, u, "email")
     return SIGNUP_ACK
+
+
+# ============================================================================ password reset
+import hashlib  # noqa: E402
+
+RESET_TTL_MIN = 60
+FORGOT_ACK = {"status": "sent", "message": "If an active account uses that email, we've sent a link to reset the password."}
+
+
+def _fingerprint(user: User) -> str:
+    # Changes whenever the password changes, so a reset link works only once.
+    return hashlib.sha256(f"{user.id}:{user.hashed_password}".encode()).hexdigest()[:24]
+
+
+def make_reset_token(user: User) -> str:
+    now = datetime.now(timezone.utc)
+    return jwt.encode({"sub": str(user.id), "purpose": "reset", "fp": _fingerprint(user), "iat": now,
+                       "exp": now + timedelta(minutes=RESET_TTL_MIN)}, get_settings().secret_key, algorithm="HS256")
+
+
+@router.post("/forgot-password", status_code=202)
+def forgot_password(body: ForgotIn, request: Request, db: Session = Depends(get_db)):
+    ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "?").split(",")[0].strip()
+    if not limiter.allow(f"forgot:{ip}", 5, 3600):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many reset requests from this network. Try again later.")
+    user = db.scalar(select(User).where(func.lower(User.email) == body.email.lower()))
+    if user and user.is_active and not user.pending_approval:
+        notify.password_reset(user, make_reset_token(user))
+        audit.record(db, user, "password_reset_requested", "user", user.id, request=request)
+        db.commit()
+    return FORGOT_ACK
+
+
+@router.post("/reset-password", status_code=204)
+def reset_password(body: ResetIn, request: Request, db: Session = Depends(get_db)):
+    bad = HTTPException(status.HTTP_400_BAD_REQUEST, "This reset link is invalid or has expired. Request a new one.")
+    try:
+        claims = jwt.decode(body.token, get_settings().secret_key, algorithms=["HS256"])
+    except jwt.PyJWTError:
+        raise bad
+    if claims.get("purpose") != "reset":
+        raise bad
+    user = db.get(User, int(claims.get("sub", 0)))
+    if not user or not user.is_active or claims.get("fp") != _fingerprint(user):
+        raise bad
+    validate_password_strength(body.new_password)
+    user.hashed_password = hash_password(body.new_password)
+    user.failed_logins = 0
+    user.locked_until = None
+    audit.record(db, user, "password_reset", "user", user.id, request=request)
+    db.commit()
+    notify.password_changed(user)

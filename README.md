@@ -76,7 +76,7 @@ Demo accounts (password `ChimpWatch!2026`): `admin@`, `analyst@`, `ranger@`, `vi
 ### Tests
 
 ```bash
-cd backend && pytest -q    # 46 tests; needs a chimpwatch_test PostGIS database
+cd backend && pytest -q    # 55 tests; needs a chimpwatch_test PostGIS database
 ```
 
 They cover auth and lockout, the Google/Apple/GitHub sign-in flows (state, nonce, email verification, approval), RBAC, location generalisation in every output, offline sync idempotency, EXIF stripping, the trend model, low-confidence capping, the alert state machine, field tasks, threshold auditing, all-or-nothing CSV imports, GBIF import and report content. CI (`.github/workflows/ci.yml`) also checks for migration drift and builds the frontend.
@@ -99,6 +99,42 @@ Apple does not accept `localhost` or plain `http` return URLs, so Apple sign-in 
 
 Security details: the authorization-code flow uses a signed, short-lived state cookie (CSRF protection), PKCE for Google and GitHub, and a nonce for Google and Apple. ID-token issuer, audience, expiry and nonce are all checked. The resulting session token is passed to the browser in the URL fragment, which is never sent to servers or logged, and is removed from the address bar immediately. Sign-ups, links, approvals and failed attempts all go to the audit log.
 
+## Operating the platform
+
+### Administrator command-line tools
+
+Run these inside the API container (`docker compose exec api ...`) or in `backend/` locally:
+
+| Command | What it does |
+|---|---|
+| `python -m app.manage create-admin --email you@org --name "Your Name"` | Create (or promote) an administrator. You're prompted for the password. |
+| `python -m app.manage reset-password --email someone@org` | Set a new password and unlock the account. Add `--activate` to also activate it. |
+| `python -m app.manage list-users` | List every account with role and status. |
+| `python -m app.manage test-email --to you@org` | Send a test email to check the SMTP settings. |
+| `python -m app.manage run-assessment` | Recompute all risk assessments now (the worker also does this every 6 hours). |
+
+### Email
+
+Set the `CW_SMTP_*` values in `.env` (see `.env.example`) and restart. The platform then emails:
+- **Administrators:** new access requests.
+- **Requesters:** approval or decline.
+- **Anyone who asks:** password-reset links, valid once and for one hour.
+- **Analysts and administrators:** new or escalated **high** alerts.
+
+Without SMTP, every email is written to the API log (`docker compose logs api`), so password resets still work during setup. Chimpanzee coordinates are never included in email.
+
+### Field surveys and encounter rates
+
+In **Add record**, a ranger starts a survey (landscape, method, team), records signs as usual, then taps **Finish survey** and enters the distance walked. Surveys and their records sync together when the device is online, and each carries a client ID, so retries never create duplicates. Encounter-rate trends use only signs recorded within surveys, divided by kilometres walked.
+
+### Map
+
+The map workspace has light, streets, satellite and terrain basemaps, a layer panel with record counts, clustered points, a density heatmap, landscape search, a time filter, scale bar, coordinate readout, "my location", "zoom to all" and full screen. Click a landscape to open its details panel. Basemap tiles come from Esri (light grey canvas and satellite), OpenStreetMap (streets) and OpenTopoMap (terrain); none need an API key. (CARTO's raster tiles have required a free API key since September 2026, so they're no longer used by default.) These free services have fair-use limits. For heavy production use, take a commercial tile plan (for example Esri, CARTO, MapTiler or Mapbox) and change the URLs in `frontend/src/components/MapView.tsx`.
+
+### Landscapes and organisations
+
+Administrators can add organisations and landscapes under **Admin**. For a landscape, upload its boundary as GeoJSON in WGS84 (for example exported from QGIS, or downloaded from Protected Planet / WDPA), or replace an existing boundary. Then run an assessment to compute indicators.
+
 ## Data in
 
 - **CSV import** (Reports → Import data): observations, habitat metrics and indicators. Templates are downloadable. Imports are all-or-nothing with row-level errors, and future dates are rejected.
@@ -109,7 +145,7 @@ Security details: the authorization-code flow uses a signed, short-lived state c
 
 - Direct Sentinel/Landsat raster processing and GFW API pulls. Land-cover metrics currently arrive by CSV.
 - Trained camera-trap models and individual re-identification.
-- MFA, email/SMS notification delivery, and multi-country tenancy configuration.
+- MFA, SMS notifications, and multi-country tenancy configuration.
 - Expert calibration of thresholds and model validation against real pilot data (§11).
 
 ## Layout

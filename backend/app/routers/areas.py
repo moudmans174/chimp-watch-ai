@@ -17,7 +17,7 @@ from ..models import (
     User,
     ValidationStatus,
 )
-from ..schemas import AreaIn, AreaOut, AssessmentOut, HabitatOut, IndicatorOut, PressureIn, PressureOut, ValidationIn
+from ..schemas import AreaIn, AreaOut, AreaUpdate, AssessmentOut, HabitatOut, IndicatorOut, PressureIn, PressureOut, ValidationIn
 from ..security import admin_only, can_analyse, can_submit, get_current_user
 from ..services import analytics
 from ..services.spatial import assign_area, compute_area_km2
@@ -53,6 +53,28 @@ def create_area(body: AreaIn, request: Request, db: Session = Depends(get_db), u
     db.flush()
     a.area_km2 = round(compute_area_km2(db, a), 1)
     audit.record(db, user, "create", "area", a.id, {"name": a.name}, request)
+    db.commit()
+    return a
+
+
+@router.patch("/areas/{area_id}", response_model=AreaOut)
+def update_area(area_id: int, body: AreaUpdate, request: Request, db: Session = Depends(get_db), user: User = Depends(admin_only)):
+    a = db.get(ProtectedArea, area_id)
+    if not a:
+        raise HTTPException(404, "Area not found")
+    changes = body.model_dump(exclude_unset=True)
+    if "boundary" in changes:
+        try:
+            a.geom = multipolygon_from_geojson(changes.pop("boundary"))
+        except Exception as exc:
+            raise HTTPException(422, f"Invalid boundary: {exc}")
+        db.flush()
+        a.area_km2 = round(compute_area_km2(db, a), 1)
+        changes["boundary"] = "replaced"
+    for k, v in changes.items():
+        if k != "boundary":
+            setattr(a, k, v)
+    audit.record(db, user, "update", "area", a.id, changes, request)
     db.commit()
     return a
 

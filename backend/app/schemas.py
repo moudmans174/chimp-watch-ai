@@ -104,6 +104,29 @@ class UserUpdate(BaseModel):
     password: str | None = None
 
 
+class ProfileUpdate(BaseModel):
+    full_name: str | None = Field(default=None, min_length=2, max_length=200)
+    phone: str | None = Field(default=None, max_length=40, pattern=r"^[0-9+()\-\s]*$")
+
+
+class ForgotIn(BaseModel):
+    email: EmailStr
+
+
+class ResetIn(BaseModel):
+    token: str = Field(max_length=2000)
+    new_password: str = Field(max_length=200)
+
+
+class AreaUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=200)
+    designation: str | None = None
+    district: str | None = None
+    description: str | None = None
+    boundary_source: str | None = None
+    boundary: dict | None = None
+
+
 class PasswordChange(BaseModel):
     current_password: str
     new_password: str
@@ -147,6 +170,7 @@ class ObservationIn(BaseModel):
     gps_accuracy_m: float | None = Field(default=None, ge=0)
     id_confidence: float | None = Field(default=None, ge=0, le=1)
     survey_id: int | None = None
+    survey_client_uuid: str | None = Field(default=None, max_length=36)
     notes: str | None = Field(default=None, max_length=4000)
     sensitive: bool | None = None
 
@@ -202,7 +226,9 @@ class ValidationIn(BaseModel):
 
 
 class SurveyIn(BaseModel):
+    client_uuid: str | None = Field(default=None, max_length=36)
     area_id: int
+    notes: str | None = Field(default=None, max_length=2000)
     method: str
     start_date: date
     end_date: date
@@ -213,7 +239,10 @@ class SurveyIn(BaseModel):
 
 class SurveyOut(ORM):
     id: int
+    client_uuid: str | None = None
     area_id: int
+    created_by: int | None = None
+    notes: str | None = None
     method: str
     start_date: date
     end_date: date

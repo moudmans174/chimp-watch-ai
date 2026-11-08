@@ -58,6 +58,14 @@ class Settings(BaseSettings):
     # Organisation that self sign-ups are placed in until an administrator assigns them
     signup_org_name: str = "Pending sign-ups"
 
+    # Email (SMTP). Leave CW_SMTP_HOST empty to write emails to the log instead.
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    smtp_starttls: bool = True
+    smtp_from: str = "CHIMP-WATCH AI <no-reply@chimpwatch.local>"
+
     seed_demo: bool = False
 
     @property
