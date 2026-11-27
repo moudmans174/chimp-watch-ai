@@ -92,7 +92,7 @@ def update_user(user_id: int, body: UserUpdate, request: Request, db: Session = 
     db.commit()
     db.refresh(u)
     if approving:
-        notify.approved(u)
+        notify.approved(u, db)
     elif rejecting:
         notify.declined(u)
     return u

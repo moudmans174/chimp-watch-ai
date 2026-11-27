@@ -367,3 +367,180 @@ class AuditLog(Base):
     entity_id: Mapped[str | None] = mapped_column(String(60))
     detail: Mapped[dict | None] = mapped_column(JSON)
     ip: Mapped[str | None] = mapped_column(String(64))
+
+
+# =============================================================================== field operations modules
+class CameraStation(Base):
+    """A fixed camera-trap location. Its position is treated as sensitive."""
+
+    __tablename__ = "camera_stations"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(40), unique=True)
+    area_id: Mapped[int | None] = mapped_column(ForeignKey("protected_areas.id"), index=True)
+    geom = mapped_column(Geometry("POINT", srid=4326, spatial_index=True))
+    habitat: Mapped[str | None] = mapped_column(String(120))
+    notes: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    area: Mapped[ProtectedArea | None] = relationship(lazy="joined")
+
+
+class CameraDeployment(Base):
+    __tablename__ = "camera_deployments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    station_id: Mapped[int] = mapped_column(ForeignKey("camera_stations.id", ondelete="CASCADE"), index=True)
+    deployed_on: Mapped[date] = mapped_column(Date)
+    retrieved_on: Mapped[date | None] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(20), default="active")  # active | retrieved | failed
+    camera_model: Mapped[str | None] = mapped_column(String(80))
+    card_id: Mapped[str | None] = mapped_column(String(40))
+    notes: Mapped[str | None] = mapped_column(Text)
+    deployed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    retrieved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    survey_id: Mapped[int | None] = mapped_column(ForeignKey("survey_efforts.id"))
+
+    station: Mapped[CameraStation] = relationship(lazy="joined")
+
+
+class CameraCapture(Base):
+    __tablename__ = "camera_captures"
+    __table_args__ = (UniqueConstraint("deployment_id", "sha256", name="uq_capture_deployment_sha"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    deployment_id: Mapped[int] = mapped_column(ForeignKey("camera_deployments.id", ondelete="CASCADE"), index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    storage_key: Mapped[str] = mapped_column(String(300))
+    content_type: Mapped[str] = mapped_column(String(100))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    classification: Mapped[dict | None] = mapped_column(JSON)
+    review_status: Mapped[str] = mapped_column(String(20), default="pending", index=True)  # pending|confirmed|empty|rejected
+    species: Mapped[str | None] = mapped_column(String(120))
+    common_name: Mapped[str | None] = mapped_column(String(120))
+    count: Mapped[int | None] = mapped_column(Integer)
+    reviewed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    observation_id: Mapped[int | None] = mapped_column(ForeignKey("observations.id", ondelete="SET NULL"))
+    uploaded_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    deployment: Mapped[CameraDeployment] = relationship(lazy="joined")
+
+
+class Patrol(Base):
+    __tablename__ = "patrols"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    client_uuid: Mapped[str] = mapped_column(String(36), unique=True)
+    area_id: Mapped[int | None] = mapped_column(ForeignKey("protected_areas.id"), index=True)
+    leader_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)
+    org_id: Mapped[int | None] = mapped_column(ForeignKey("organisations.id"))
+    team: Mapped[str | None] = mapped_column(String(200))
+    purpose: Mapped[str] = mapped_column(String(40), default="monitoring")  # monitoring|law_enforcement|survey|community|other
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    distance_km: Mapped[float] = mapped_column(Float, default=0)
+    points: Mapped[int] = mapped_column(Integer, default=0)
+    track = mapped_column(Geometry("LINESTRING", srid=4326, spatial_index=True))
+    source: Mapped[str] = mapped_column(String(20), default="app")  # app | gpx | demo
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    area: Mapped[ProtectedArea | None] = relationship(lazy="joined")
+    leader: Mapped[User | None] = relationship(lazy="joined")
+
+
+class ConflictIncident(Base):
+    """Human-wildlife conflict, e.g. crop raiding. Reporter contact details are visible to analysts only."""
+
+    __tablename__ = "conflict_incidents"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    client_uuid: Mapped[str] = mapped_column(String(36), unique=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    geom = mapped_column(Geometry("POINT", srid=4326, spatial_index=True))
+    area_id: Mapped[int | None] = mapped_column(ForeignKey("protected_areas.id"), index=True)
+    district: Mapped[str | None] = mapped_column(String(100), index=True)
+    community: Mapped[str | None] = mapped_column(String(150))
+    species: Mapped[str] = mapped_column(String(60))
+    kind: Mapped[str] = mapped_column(String(40))
+    crops: Mapped[str | None] = mapped_column(String(200))
+    loss_estimate_le: Mapped[float | None] = mapped_column(Float)
+    area_damaged_ha: Mapped[float | None] = mapped_column(Float)
+    people_affected: Mapped[int | None] = mapped_column(Integer)
+    description: Mapped[str | None] = mapped_column(Text)
+    reporter_name: Mapped[str | None] = mapped_column(String(150))
+    reporter_phone: Mapped[str | None] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(20), default="reported", index=True)  # reported|verified|responded|closed
+    response_notes: Mapped[str | None] = mapped_column(Text)
+    assigned_to: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    org_id: Mapped[int | None] = mapped_column(ForeignKey("organisations.id"))
+    source: Mapped[str] = mapped_column(String(20), default="field")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    area: Mapped[ProtectedArea | None] = relationship(lazy="joined")
+
+
+class OutreachActivity(Base):
+    __tablename__ = "outreach_activities"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    client_uuid: Mapped[str] = mapped_column(String(36), unique=True)
+    area_id: Mapped[int | None] = mapped_column(ForeignKey("protected_areas.id"), index=True)
+    community: Mapped[str] = mapped_column(String(150))
+    kind: Mapped[str] = mapped_column(String(40))  # meeting|awareness|school|training|agreement|monitor_recruitment|other
+    held_on: Mapped[date] = mapped_column(Date, index=True)
+    participants: Mapped[int] = mapped_column(Integer, default=0)
+    women: Mapped[int | None] = mapped_column(Integer)
+    youth: Mapped[int | None] = mapped_column(Integer)
+    facilitator: Mapped[str | None] = mapped_column(String(150))
+    summary: Mapped[str] = mapped_column(Text)
+    follow_up: Mapped[str | None] = mapped_column(Text)
+    follow_up_due: Mapped[date | None] = mapped_column(Date)
+    follow_up_done: Mapped[bool] = mapped_column(Boolean, default=False)
+    geom = mapped_column(Geometry("POINT", srid=4326))
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    org_id: Mapped[int | None] = mapped_column(ForeignKey("organisations.id"))
+    source: Mapped[str] = mapped_column(String(20), default="field")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    area: Mapped[ProtectedArea | None] = relationship(lazy="joined")
+
+
+class ForestAlert(Base):
+    """A satellite forest-disturbance alert pixel (e.g. GFW integrated alerts)."""
+
+    __tablename__ = "forest_alerts"
+    __table_args__ = (UniqueConstraint("source", "alert_date", "lat", "lon", name="uq_forest_alert_px"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    area_id: Mapped[int | None] = mapped_column(ForeignKey("protected_areas.id"), index=True)
+    alert_date: Mapped[date] = mapped_column(Date, index=True)
+    lat: Mapped[float] = mapped_column(Float)
+    lon: Mapped[float] = mapped_column(Float)
+    geom = mapped_column(Geometry("POINT", srid=4326, spatial_index=True))
+    confidence: Mapped[str] = mapped_column(String(20))
+    intensity: Mapped[float | None] = mapped_column(Float)
+    source: Mapped[str] = mapped_column(String(40), default="gfw_integrated_alerts")
+    pressure_event_id: Mapped[int | None] = mapped_column(ForeignKey("pressure_events.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(40))
+    title: Mapped[str] = mapped_column(String(250))
+    body: Mapped[str | None] = mapped_column(Text)
+    link: Mapped[str | None] = mapped_column(String(300))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SyncState(Base):
+    """Bookkeeping for scheduled integrations (last run, last error)."""
+
+    __tablename__ = "sync_state"
+    key: Mapped[str] = mapped_column(String(60), primary_key=True)
+    value: Mapped[dict | None] = mapped_column(JSON)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

@@ -1,6 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../lib/api";
-import { activeSession, cancelSession, discard, enqueue, finishSession, onQueueChange, queued, startSession, syncNow, type QueuedObservation, type SurveySession } from "../lib/offline";
+import { activeSession, cancelSession, discard, discardJob, enqueue, finishSession, onQueueChange, queued, queuedJobs, startSession, syncNow, type QueuedJob, type QueuedObservation, type SurveySession } from "../lib/offline";
+import { useSearchParams } from "react-router-dom";
+import { ConflictForm, PatrolForm } from "./CaptureField";
 import { useApi } from "../lib/useApi";
 import type { Area } from "../lib/types";
 import { humanize } from "../lib/format";
@@ -32,11 +34,14 @@ function useGps() {
 }
 
 export default function Capture() {
-  const [mode, setMode] = useState<"chimp" | "pressure">("chimp");
+  const [params, setParams] = useSearchParams();
+  const mode = (params.get("tab") as "chimp" | "pressure" | "patrol" | "conflict") || "chimp";
+  const setMode = (t: string) => setParams({ tab: t }, { replace: true });
   const [queue, setQueue] = useState<QueuedObservation[]>([]);
+  const [jobs, setJobs] = useState<QueuedJob[]>([]);
   const [session, setSession] = useState<SurveySession | null>(activeSession());
   useEffect(() => {
-    const r = () => { void queued().then(setQueue); setSession(activeSession()); };
+    const r = () => { void queued().then(setQueue); void queuedJobs().then(setJobs); setSession(activeSession()); };
     r();
     const un = onQueueChange(r);
     return () => { un(); };
@@ -55,7 +60,19 @@ export default function Capture() {
       <div className="tabs" role="tablist">
         <button role="tab" aria-selected={mode === "chimp"} onClick={() => setMode("chimp")}>Chimpanzee sign</button>
         <button role="tab" aria-selected={mode === "pressure"} onClick={() => setMode("pressure")}>Human pressure</button>
+        <button role="tab" aria-selected={mode === "patrol"} onClick={() => setMode("patrol")}>Patrol</button>
+        <button role="tab" aria-selected={mode === "conflict"} onClick={() => setMode("conflict")}>Wildlife conflict</button>
       </div>
+      {jobs.length > 0 && (
+        <div className="queue stack" style={{ gap: 8, marginBottom: 16 }}>
+          <div className="spread"><b>{jobs.length} patrol or incident record{jobs.length > 1 ? "s" : ""} waiting to send</b>
+            <button className="btn" onClick={async () => { await syncNow(); toast(navigator.onLine ? "Sync attempted" : "Still offline"); }}>Send now</button></div>
+          {jobs.map((j) => (
+            <div key={j.client_uuid} className="small spread"><span>{j.label}{j.last_error ? `: ${j.last_error}` : ""}</span>
+              {j.last_error && <button className="btn ghost" onClick={() => discardJob(j.client_uuid)}>Discard</button>}</div>
+          ))}
+        </div>
+      )}
       {queue.length > 0 && (
         <div className="queue stack" style={{ gap: 8, marginBottom: 16 }}>
           <div className="spread"><b>{queue.length} record{queue.length > 1 ? "s" : ""} waiting to send{heldBySession ? ` (${heldBySession} held until the survey ends)` : ""}</b>
@@ -66,7 +83,7 @@ export default function Capture() {
           ))}
         </div>
       )}
-      {mode === "chimp" ? <ChimpForm session={session} /> : <PressureForm />}
+      {mode === "chimp" ? <ChimpForm session={session} /> : mode === "pressure" ? <PressureForm /> : mode === "patrol" ? <PatrolForm /> : <ConflictForm />}
     </div>
   );
 }

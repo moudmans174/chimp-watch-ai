@@ -23,7 +23,16 @@ export interface Pressure { id: number; kind: string; severity: number; lon: num
 
 export type Basemap = "light" | "streets" | "satellite" | "terrain";
 export type RecordDisplay = "clusters" | "points" | "heatmap";
-export interface MapLayers { areas: boolean; chimps: boolean; wildlife: boolean; pressures: boolean; imagery?: boolean }
+export interface MapLayers { areas: boolean; chimps: boolean; wildlife: boolean; pressures: boolean; imagery?: boolean;
+  cameras?: boolean; patrols?: boolean; conflicts?: boolean; forest?: boolean }
+export interface FieldData {
+  cameras?: { id: number; code: string; area_name: string | null; active_deployment: unknown; location: { lon: number; lat: number; generalised: boolean } | null }[] | null;
+  patrols?: GeoJSON.FeatureCollection | null;
+  conflicts?: { id: number; lon: number; lat: number; kind: string; species: string; community: string | null; occurred_at: string; status: string }[] | null;
+  forest?: { id: number; lon: number; lat: number; date: string; confidence: string | null; area_name: string | null }[] | null;
+}
+/** Overlay colours, chosen to stay distinct from the chimp teal and pressure red. */
+export const FIELD_COLORS = { cameras: "#5b4b8a", patrols: "#2563a8", conflicts: "#b8661a", forest: "#c0267a" };
 
 export const BASEMAPS: Record<Basemap, { label: string; url: string; attribution: string; maxZoom: number }> = {
   // Esri Light Gray Canvas: clean, label-light, no API key required.
@@ -64,6 +73,7 @@ interface Props {
   focusAreaId?: number;
   showScale?: boolean;
   showCoordinates?: boolean;
+  field?: FieldData;
 }
 
 const css = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -76,13 +86,17 @@ const PAD = [48, 48, 48, 48];
 
 const MapView = forwardRef<MapHandle, Props>(function MapView(
   { areas, observations, pressures, layers = {}, basemap = "light", display = "clusters", selectedAreaId, onAreaClick,
-    focusAreaId, showScale = true, showCoordinates = false }, ref) {
+    focusAreaId, showScale = true, showCoordinates = false, field }, ref) {
   const el = useRef<HTMLDivElement>(null);
   const mapRef = useRef<OLMap | null>(null);
   const areaSrc = useRef(new VectorSource());
   const obsSrc = useRef(new VectorSource());
   const pressSrc = useRef(new VectorSource());
   const youSrc = useRef(new VectorSource());
+  const camSrc = useRef(new VectorSource());
+  const patSrc = useRef(new VectorSource());
+  const conSrc = useRef(new VectorSource());
+  const forSrc = useRef(new VectorSource());
   const L = useRef<Record<string, TileLayer | VectorLayer | HeatmapLayer>>({});
   const [pop, setPop] = useState<{ x: number; y: number; html: React.ReactNode } | null>(null);
   const clickRef = useRef(onAreaClick);
@@ -186,6 +200,17 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(
     });
     L.current.press = new VectorLayer({ source: pressSrc.current, style: pressStyle, zIndex: 3 });
     L.current.you = new VectorLayer({ source: youSrc.current, style: youStyle, zIndex: 4 });
+    const C = FIELD_COLORS;
+    const camStyle = (f: FeatureLike) => new Style({ image: new RegularShape({ points: 4, radius: 6, angle: Math.PI / 4,
+      fill: new Fill({ color: f.get("active_deployment") ? C.cameras : "#fff" }), stroke: new Stroke({ color: f.get("active_deployment") ? "#fff" : C.cameras, width: 2 }) }) });
+    const patStyle = [new Style({ stroke: new Stroke({ color: "rgba(255,255,255,.85)", width: 4.5 }) }), new Style({ stroke: new Stroke({ color: C.patrols, width: 2, lineDash: [6, 4] }) })];
+    const conStyle = (f: FeatureLike) => new Style({ image: new RegularShape({ points: 4, radius: 6.5, angle: 0,
+      fill: new Fill({ color: f.get("status") === "closed" ? alpha(C.conflicts, 0.35) : C.conflicts }), stroke: new Stroke({ color: "#fff", width: 1.5 }) }) });
+    const forStyle = (f: FeatureLike) => new Style({ image: new Circle({ radius: ["high", "highest"].includes(f.get("confidence")) ? 3.5 : 2.5, fill: new Fill({ color: C.forest }) }) });
+    L.current.patrols = new VectorLayer({ source: patSrc.current, style: patStyle, zIndex: 2, visible: false });
+    L.current.forest = new VectorLayer({ source: forSrc.current, style: forStyle, zIndex: 2, visible: false });
+    L.current.cameras = new VectorLayer({ source: camSrc.current, style: camStyle, zIndex: 3, visible: false });
+    L.current.conflicts = new VectorLayer({ source: conSrc.current, style: conStyle, zIndex: 3, visible: false });
 
     const controls = [new Zoom({ className: "ol-zoom cw-zoom" }), new Attribution({ collapsible: true, collapsed: true })];
     if (showScale) controls.push(new ScaleLine({ units: "metric", minWidth: 80, className: "cw-scale" }) as never);
@@ -203,7 +228,8 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(
     const map = new OLMap({
       target: el.current,
       layers: [L.current.light, L.current.lightLabels, L.current.streets, L.current.satellite, L.current.terrain, L.current.areas,
-        L.current.heat, L.current.points, L.current.clusters, L.current.press, L.current.you, L.current.labels],
+        L.current.patrols, L.current.forest, L.current.heat, L.current.points, L.current.clusters, L.current.press,
+        L.current.cameras, L.current.conflicts, L.current.you, L.current.labels],
       view: new View({ center: fromLonLat([-11.8, 8.55]), zoom: 7.6, minZoom: 5, maxZoom: 18 }),
       controls,
     });
@@ -228,7 +254,13 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(
         }
         p = members[0].getProperties();
       }
-      if (p.you) html = <b>Your location</b>;
+      const day = (v: string) => new Date(v).toLocaleDateString("en-GB");
+      const words = (v: unknown) => String(v).replace(/_/g, " ");
+      if (layer === L.current.cameras) html = <><b>Camera station {p.code}</b><div className="muted">{p.active_deployment ? "Camera in the field" : "No camera deployed"} · {p.area_name ?? "Outside pilot areas"}</div>{p.generalised && <div className="muted">Position generalised</div>}</>;
+      else if (layer === L.current.patrols) html = <><b>Patrol, {Number(p.distance_km).toFixed(1)} km</b><div className="muted">{day(p.started_at)} · {p.team || p.leader_name || "—"} · {words(p.purpose)}</div></>;
+      else if (layer === L.current.conflicts) html = <><b>{words(p.kind)[0].toUpperCase() + words(p.kind).slice(1)}</b><div className="muted">{words(p.species)} · {p.community ?? "—"} · {day(p.occurred_at)}</div><div className="muted">Status: {p.status}</div></>;
+      else if (layer === L.current.forest) html = <><b>Satellite forest alert</b><div className="muted">{day(p.date)} · {p.confidence ?? "—"} confidence</div><div className="muted">{p.area_name ?? ""}</div></>;
+      else if (p.you) html = <b>Your location</b>;
       else if (p.kind) html = <><b>{String(p.kind)[0].toUpperCase() + String(p.kind).slice(1)} pressure</b><div className="muted">Severity {p.severity} of 3 · {new Date(p.observed_at).toLocaleDateString("en-GB")}</div><div className="muted">{p.area_name ?? "Outside pilot areas"} · {p.validation_status}</div></>;
       else if (p.species) html = <><b>{p.common_name || p.species}</b><div className="muted">{String(p.evidence_type).replace(/_/g, " ")} · {p.count} · {new Date(p.observed_at).toLocaleDateString("en-GB")}</div>{p.generalised && <div className="muted">Location generalised to ~{p.precision_km} km</div>}</>;
       else html = <><b>{p.name}</b><div className="muted">{p.designation} · {p.district}</div><div>Overall concern: {p.risk_level ?? "not assessed"}</div><div className="muted">Click for details</div></>;
@@ -295,6 +327,29 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(
   }, [pressures]);
 
   useEffect(() => {
+    camSrc.current.clear();
+    (field?.cameras || []).forEach((c) => c.location && camSrc.current.addFeature(new Feature({ geometry: new Point(fromLonLat([c.location.lon, c.location.lat])), ...c, generalised: c.location.generalised })));
+  }, [field?.cameras]);
+  useEffect(() => {
+    patSrc.current.clear();
+    if (field?.patrols) patSrc.current.addFeatures(new GeoJSON().readFeatures(field.patrols, { featureProjection: "EPSG:3857" }));
+  }, [field?.patrols]);
+  useEffect(() => {
+    conSrc.current.clear();
+    (field?.conflicts || []).forEach((c) => conSrc.current.addFeature(new Feature({ geometry: new Point(fromLonLat([c.lon, c.lat])), ...c })));
+  }, [field?.conflicts]);
+  useEffect(() => {
+    forSrc.current.clear();
+    (field?.forest || []).forEach((c) => forSrc.current.addFeature(new Feature({ geometry: new Point(fromLonLat([c.lon, c.lat])), ...c })));
+  }, [field?.forest]);
+  useEffect(() => {
+    L.current.cameras?.setVisible(!!layers.cameras);
+    L.current.patrols?.setVisible(!!layers.patrols);
+    L.current.conflicts?.setVisible(!!layers.conflicts);
+    L.current.forest?.setVisible(!!layers.forest);
+  }, [layers.cameras, layers.patrols, layers.conflicts, layers.forest]);
+
+  useEffect(() => {
     const bm: Basemap = layers.imagery ? "satellite" : basemap;
     (["light", "streets", "satellite", "terrain"] as Basemap[]).forEach((k) => L.current[k]?.setVisible(k === bm));
     L.current.lightLabels?.setVisible(bm === "light");
@@ -318,7 +373,8 @@ const MapView = forwardRef<MapHandle, Props>(function MapView(
 
 export default MapView;
 
-export function MapLegend({ generalisedKm, compact = false }: { generalisedKm?: number; compact?: boolean }) {
+export function MapLegend({ generalisedKm, compact = false, extra }: { generalisedKm?: number; compact?: boolean; extra?: Partial<MapLayers> }) {
+  const C = FIELD_COLORS;
   return (
     <div className={`map-legend ${compact ? "compact" : ""}`}>
       <div className="lg-title">Overall concern</div>
@@ -330,6 +386,10 @@ export function MapLegend({ generalisedKm, compact = false }: { generalisedKm?: 
       <div><svg width="12" height="12"><circle cx="6" cy="6" r="4.5" fill="var(--teal)" /></svg>Chimpanzee record</div>
       <div><svg width="12" height="12"><rect x="2" y="2" width="8" height="8" transform="rotate(45 6 6)" fill="none" stroke="var(--teal)" strokeWidth="1.5" /></svg>Generalised to ~{generalisedKm ?? 11} km</div>
       <div><svg width="12" height="12"><path d="M6 1l5 10H1z" fill="var(--high)" /></svg>Human pressure report</div>
+      {extra?.cameras && <div><svg width="12" height="12"><rect x="2.5" y="2.5" width="7" height="7" transform="rotate(45 6 6)" fill={C.cameras} /></svg>Camera station (hollow: no camera)</div>}
+      {extra?.patrols && <div><svg width="12" height="12"><path d="M0 6h12" stroke={C.patrols} strokeWidth="2" strokeDasharray="4 2" /></svg>Patrol track</div>}
+      {extra?.conflicts && <div><svg width="12" height="12"><rect x="2" y="2" width="8" height="8" fill={C.conflicts} /></svg>Wildlife conflict incident</div>}
+      {extra?.forest && <div><svg width="12" height="12"><circle cx="6" cy="6" r="3" fill={C.forest} /></svg>Satellite forest alert</div>}
     </div>
   );
 }

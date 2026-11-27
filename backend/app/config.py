@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     smtp_starttls: bool = True
     smtp_from: str = "CHIMP-WATCH AI <no-reply@chimpwatch.local>"
 
+    # Global Forest Watch (satellite forest-disturbance alerts). Free key: https://www.globalforestwatch.org/help/developers/
+    gfw_api_key: str | None = None
+    gfw_data_api_url: str = "https://data-api.globalforestwatch.org"
+    gfw_dataset: str = "gfw_integrated_alerts"
+    forest_alert_min_confidence: str = "nominal"  # low | nominal | high
+    forest_alert_lookback_days: int = 60
+    forest_alert_sync_hours: int = 24
+
     seed_demo: bool = False
 
     @property

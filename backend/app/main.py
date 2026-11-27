@@ -9,7 +9,7 @@ from sqlalchemy import text
 from .config import get_settings
 from .db import SessionLocal
 from .ratelimit import limiter
-from .routers import admin, alerts, analytics, areas, auth, observations
+from .routers import admin, alerts, analytics, areas, auth, field, notifications, observations
 
 settings = get_settings()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -54,7 +54,8 @@ async def security_and_logging(request: Request, call_next):
     return response
 
 
-for r in (auth.router, admin.router, areas.router, observations.router, alerts.router, analytics.router):
+for r in (auth.router, admin.router, areas.router, observations.router, alerts.router, analytics.router,
+          field.router, notifications.router):
     app.include_router(r)
 
 
@@ -74,6 +75,7 @@ def health():
 def meta():
     from .models import AlertLevel, AlertStatus, EvidenceType, Role, TaskStatus
     from .routers.areas import PRESSURE_KINDS
+    from .routers.field import CONFLICT_KINDS, CONFLICT_SPECIES, OUTREACH_KINDS
     from .services.risk import INDICATORS
     return {
         "evidence_types": [e.value for e in EvidenceType],
@@ -82,6 +84,9 @@ def meta():
         "alert_statuses": [s.value for s in AlertStatus],
         "task_statuses": [s.value for s in TaskStatus],
         "pressure_kinds": sorted(PRESSURE_KINDS),
+        "conflict_species": list(CONFLICT_SPECIES),
+        "conflict_kinds": list(CONFLICT_KINDS),
+        "outreach_kinds": list(OUTREACH_KINDS),
         "indicators": INDICATORS,
         "model_version": settings.risk_model_version,
         "generalisation_km": round(settings.location_generalisation_deg * 111, 1),

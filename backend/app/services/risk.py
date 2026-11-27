@@ -206,7 +206,10 @@ def _indicator_series(db: Session, name: str, area_id: int | None = None, distri
 def biodiversity_change(db: Session, area: ProtectedArea, today: date):
     comp = {"label": INDICATORS["biodiversity_change"], "basis": "observed", "score": None,
             "confidence": "insufficient", "data_as_of": None, "drivers": [], "metrics": {}}
-    rows = _indicator_series(db, "species_richness", area_id=area.id)[-8:]
+    all_rows = _indicator_series(db, "species_richness", area_id=area.id)
+    # Prefer richness computed from this platform's own confirmed camera-trap captures once there's enough of it
+    own = [r for r in all_rows if r.source == "CHIMP-WATCH camera traps"]
+    rows = (own if len(own) >= 4 else all_rows)[-8:]
     if len(rows) < 4:
         comp["drivers"].append("Fewer than four periods of camera-trap species-richness data.")
         return comp
@@ -308,6 +311,14 @@ def food_security_vulnerability(db: Session, area: ProtectedArea, today: date):
         dates.append(rf[-1].data_date or rf[-1].period_start)
         if abs(v) >= 15:
             comp["drivers"].append(f"Seasonal rainfall {v:+.0f}% vs long-term average.")
+    from ..models import ConflictIncident
+    since = datetime.now(timezone.utc) - timedelta(days=365)
+    raids = db.scalar(select(func.count(ConflictIncident.id)).where(
+        ConflictIncident.district == area.district, ConflictIncident.occurred_at >= since,
+        ConflictIncident.kind == "crop_raiding", ConflictIncident.status != "closed_invalid")) or 0
+    if raids:
+        comp["metrics"]["crop_raiding_incidents_12m"] = raids
+        comp["drivers"].append(f"{raids} crop-raiding incident{'s' if raids != 1 else ''} reported in {area.district} in the last 12 months (context; not used in the score).")
     if not parts:
         comp["drivers"].append(f"No food-security indicators for {area.district} district.")
         return comp

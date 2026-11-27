@@ -112,6 +112,8 @@ Run these inside the API container (`docker compose exec api ...`) or in `backen
 | `python -m app.manage list-users` | List every account with role and status. |
 | `python -m app.manage test-email --to you@org` | Send a test email to check the SMTP settings. |
 | `python -m app.manage run-assessment` | Recompute all risk assessments now (the worker also does this every 6 hours). |
+| `python -m app.manage seed-field-demo` | Add demo camera stations, patrols, conflict incidents, outreach and forest alerts to an existing database. Skipped if field data already exists. |
+| `python -m app.manage forest-sync --days 60` | Pull satellite forest alerts from Global Forest Watch now (the worker does this daily). |
 
 ### Email
 
@@ -131,6 +133,15 @@ In **Add record**, a ranger starts a survey (landscape, method, team), records s
 
 The map workspace has light, streets, satellite and terrain basemaps, a layer panel with record counts, clustered points, a density heatmap, landscape search, a time filter, scale bar, coordinate readout, "my location", "zoom to all" and full screen. Click a landscape to open its details panel. Basemap tiles come from Esri (light grey canvas and satellite), OpenStreetMap (streets) and OpenTopoMap (terrain); none need an API key. (CARTO's raster tiles have required a free API key since September 2026, so they're no longer used by default.) These free services have fair-use limits. For heavy production use, take a commercial tile plan (for example Esri, CARTO, MapTiler or Mapbox) and change the URLs in `frontend/src/components/MapView.tsx`.
 
+### Field operations
+
+- **Camera traps** (`/cameras`): register stations, deploy and retrieve cameras, and upload a card's photos (location data is stripped, the photo date is kept, duplicates are skipped). Analysts review photos in the queue; confirming one creates a verified wildlife record at the station. Each retrieval adds trap-days of survey effort, and confirmed species feed the biodiversity indicator.
+- **Patrols** (`/patrols`): rangers record a track with the phone's GPS in **Add record → Patrol** (works offline; keep the screen on), or import a GPX file from a handheld GPS. Distance and hours are summarised per landscape. Tracks appear on the map but are hidden from viewer accounts.
+- **Wildlife conflict** (`/conflict`): crop raiding, damage, livestock loss and injuries, reported offline from **Add record → Wildlife conflict**. Analysts assign, record the response and close incidents. Reporter names and phone numbers are visible only to analysts and administrators. Crop-raiding counts are shown as context on the district's food-security indicator, but they're not used in its score.
+- **Community** (`/community`): meetings, school visits, training and agreements, with participant counts (women, youth) and follow-ups that can be marked done.
+- **Satellite forest alerts** (Ecosystem → Forest alerts): Global Forest Watch integrated alerts (GLAD-L, GLAD-S2, RADD) for each landscape. Weekly clusters become *forest-loss alert* pressure reports, which feed habitat pressure. To switch it on, set `CW_GFW_API_KEY` in `.env` and restart.
+- **Notifications:** the bell in the top bar shows in-app notifications for task assignments, new conflict incidents, photos to review, forest-alert hotspots, access requests and high alerts. The same events are emailed when SMTP is set.
+
 ### Landscapes and organisations
 
 Administrators can add organisations and landscapes under **Admin**. For a landscape, upload its boundary as GeoJSON in WGS84 (for example exported from QGIS, or downloaded from Protected Planet / WDPA), or replace an existing boundary. Then run an assessment to compute indicators.
@@ -143,7 +154,8 @@ Administrators can add organisations and landscapes under **Admin**. For a lands
 
 ## Not yet included (next steps from the proposal)
 
-- Direct Sentinel/Landsat raster processing and GFW API pulls. Land-cover metrics currently arrive by CSV.
+- Direct Sentinel/Landsat raster processing. Annual land-cover metrics still arrive by CSV (forest-disturbance alerts now come from the GFW API).
+- Scheduled PDF situation reports and a partner data API.
 - Trained camera-trap models and individual re-identification.
 - MFA, SMS notifications, and multi-country tenancy configuration.
 - Expert calibration of thresholds and model validation against real pilot data (§11).

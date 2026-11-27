@@ -9,6 +9,30 @@ import { api } from "./api";
 
 const store = createStore("chimpwatch", "outbox");
 const surveyStore = createStore("chimpwatch-surveys", "surveys");
+const jobStore = createStore("chimpwatch-jobs", "jobs");
+
+/** A generic queued JSON submission (patrols, conflict reports...). The endpoint must be idempotent on client_uuid. */
+export interface QueuedJob {
+  client_uuid: string;
+  endpoint: string;
+  label: string;
+  payload: Record<string, unknown>;
+  queued_at: string;
+  last_error?: string;
+}
+
+export async function enqueueJob(endpoint: string, label: string, payload: Record<string, unknown>): Promise<QueuedJob> {
+  const client_uuid = (payload.client_uuid as string) || crypto.randomUUID();
+  const job: QueuedJob = { client_uuid, endpoint, label, payload: { ...payload, client_uuid }, queued_at: new Date().toISOString() };
+  await set(client_uuid, job, jobStore);
+  notify();
+  void syncNow();
+  return job;
+}
+export async function queuedJobs(): Promise<QueuedJob[]> {
+  return (await entries<string, QueuedJob>(jobStore)).map(([, v]) => v);
+}
+export async function discardJob(uuid: string) { await del(uuid, jobStore); notify(); }
 const SESSION_KEY = "cw.session.active";
 
 export interface QueuedObservation {
@@ -145,7 +169,20 @@ export async function syncNow(): Promise<{ sent: number; failed: number; held: n
         }
       }
     }
-    // 3. forget surveys whose observations have all gone
+    // 3. other queued submissions (patrols, conflict reports)
+    for (const job of await queuedJobs()) {
+      try {
+        await api(job.endpoint, { method: "POST", json: job.payload });
+        await del(job.client_uuid, jobStore);
+        sent++;
+      } catch (e) {
+        const status = (e as { status?: number }).status;
+        if (status === 0) break;  // still offline
+        await set(job.client_uuid, { ...job, last_error: (e as Error).message }, jobStore);
+        failed++;
+      }
+    }
+    // 4. forget surveys whose observations have all gone
     const remaining = new Set((await queued()).map((i) => i.payload.survey_client_uuid as string | undefined));
     for (const sv of await queuedSurveys()) if (sv.sent && !remaining.has(sv.client_uuid)) await del(sv.client_uuid, surveyStore);
   } catch {

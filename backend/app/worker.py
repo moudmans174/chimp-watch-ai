@@ -8,7 +8,7 @@ import time
 
 from .config import get_settings
 from .db import SessionLocal
-from .services import risk
+from .services import forest_alerts, risk
 
 log = logging.getLogger("chimpwatch.worker")
 _stop = False
@@ -21,6 +21,11 @@ def _handle(*_):
 
 def run_once() -> dict:
     with SessionLocal() as db:
+        if forest_alerts.due(db):
+            try:
+                log.info("forest alert sync: %s", forest_alerts.sync(db))
+            except Exception:
+                log.exception("forest alert sync failed")
         return risk.run_all(db)
 
 

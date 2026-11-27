@@ -9,6 +9,7 @@ from ..db import get_db
 from ..models import Alert, AlertLevel, AlertStatus, FieldTask, Role, TaskStatus, User
 from ..schemas import AlertOut, AlertUpdate, TaskIn, TaskOut, TaskUpdate
 from ..security import can_analyse, get_current_user
+from ..services import notify
 
 router = APIRouter(prefix="/api", tags=["alerts & tasks"])
 
@@ -128,6 +129,8 @@ def create_task(body: TaskIn, request: Request, db: Session = Depends(get_db), u
     db.add(t)
     db.flush()
     audit.record(db, user, "create", "task", t.id, body.model_dump(mode="json"), request)
+    if t.assigned_to and t.assigned_to != user.id:
+        notify.task_assigned(db, t, db.get(User, t.assigned_to), user)
     db.commit()
     db.refresh(t)
     return _task_out(t)
@@ -147,8 +150,11 @@ def update_task(task_id: int, body: TaskUpdate, request: Request, db: Session = 
         raise HTTPException(403, "Only analysts can reassign or reschedule tasks")
     if changes.get("status") == TaskStatus.done and not (body.outcome or t.outcome):
         raise HTTPException(422, "Record the outcome before completing a task")
+    reassigned = changes.get("assigned_to") and changes["assigned_to"] != t.assigned_to
     for k, v in changes.items():
         setattr(t, k, v)
+    if reassigned and t.assigned_to != user.id:
+        notify.task_assigned(db, t, db.get(User, t.assigned_to), user)
     if changes.get("status") == TaskStatus.done:
         t.completed_at = datetime.now(timezone.utc)
     audit.record(db, user, "update", "task", t.id, {k: (v.value if hasattr(v, "value") else str(v)) for k, v in changes.items()}, request)

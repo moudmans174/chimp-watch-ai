@@ -112,6 +112,23 @@ def dashboard(db: Session = Depends(get_db), user: User = Depends(get_current_us
                    "levels": {k: c.get("level") for k, c in ra.components.items()}} for ra in assessments],
         "monthly_chimp_records": [{"month": m.strftime("%Y-%m"), "count": n} for m, n in monthly],
         "last_assessment": max((ra.computed_at for ra in assessments), default=None),
+        "field": _field_activity(db, now),
+    }
+
+
+def _field_activity(db: Session, now: datetime) -> dict:
+    from ..models import CameraCapture, CameraDeployment, ConflictIncident, ForestAlert, OutreachActivity, Patrol
+    d30, d90 = now - timedelta(days=30), now - timedelta(days=90)
+    return {
+        "patrol_km_30d": round(float(db.scalar(select(func.coalesce(func.sum(Patrol.distance_km), 0)).where(Patrol.started_at >= d30)) or 0), 1),
+        "patrols_30d": db.scalar(select(func.count(Patrol.id)).where(Patrol.started_at >= d30)) or 0,
+        "active_cameras": db.scalar(select(func.count(CameraDeployment.id)).where(CameraDeployment.status == "active")) or 0,
+        "captures_to_review": db.scalar(select(func.count(CameraCapture.id)).where(CameraCapture.review_status == "pending")) or 0,
+        "conflicts_90d": db.scalar(select(func.count(ConflictIncident.id)).where(ConflictIncident.occurred_at >= d90)) or 0,
+        "conflicts_open": db.scalar(select(func.count(ConflictIncident.id)).where(ConflictIncident.status != "closed")) or 0,
+        "outreach_participants_90d": int(db.scalar(select(func.coalesce(func.sum(OutreachActivity.participants), 0)).where(
+            OutreachActivity.held_on >= d90.date())) or 0),
+        "forest_alerts_30d": db.scalar(select(func.count(ForestAlert.id)).where(ForestAlert.alert_date >= d30.date())) or 0,
     }
 
 

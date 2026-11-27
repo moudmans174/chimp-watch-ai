@@ -16,6 +16,7 @@ interface Dash {
   areas: { area_id: number; area: string; level: Level; computed_at: string; scores: Record<string, number | null>; levels: Record<string, Level> }[];
   monthly_chimp_records: { month: string; count: number }[];
   last_assessment: string | null;
+  field?: { patrol_km_30d: number; patrols_30d: number; active_cameras: number; captures_to_review: number; conflicts_90d: number; conflicts_open: number; outreach_participants_90d: number; forest_alerts_30d: number };
 }
 
 const RANK: Record<Level, number> = { high: 0, medium: 1, low: 2 };
@@ -106,6 +107,22 @@ export default function Dashboard() {
           </section>
         </div>
       </div>
+
+      {data.field && (
+        <section className="panel" style={{ marginTop: 16 }}>
+          <div className="panel-head"><h2>Field activity</h2><span className="sub">Patrols and forest alerts: last 30 days. Conflict and outreach: last 90 days.</span></div>
+          <div className="panel-pad">
+            <div className="dash-field">
+              <Link to="/patrols"><b>{num(data.field.patrol_km_30d, 1)} km</b><span>patrolled in {data.field.patrols_30d} patrols</span></Link>
+              <Link to="/cameras"><b>{data.field.active_cameras}</b><span>cameras in the field</span></Link>
+              <Link to="/cameras?tab=review"><b>{data.field.captures_to_review}</b><span>camera photos to review</span></Link>
+              <Link to="/conflict"><b>{data.field.conflicts_open}</b><span>open conflict incidents ({data.field.conflicts_90d} reported)</span></Link>
+              <Link to="/community"><b>{num(data.field.outreach_participants_90d)}</b><span>people reached by outreach</span></Link>
+              <Link to="/ecosystem?tab=forest"><b>{num(data.field.forest_alerts_30d)}</b><span>satellite forest alerts</span></Link>
+            </div>
+          </div>
+        </section>
+      )}
 
       <section className="panel" style={{ marginTop: 16 }}>
         <div className="panel-head"><h2>Verified chimpanzee records per month</h2><span className="sub">Raw counts, not adjusted for survey effort — see each landscape for encounter rates</span></div>

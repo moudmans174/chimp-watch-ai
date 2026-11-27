@@ -141,7 +141,7 @@ def _p_out(p: PressureEvent, names: dict[int, str]) -> PressureOut:
                        source=p.source, validation_status=p.validation_status)
 
 
-PRESSURE_KINDS = {"mining", "logging", "agriculture", "fire", "snare", "hunting", "settlement", "road", "charcoal", "other"}
+PRESSURE_KINDS = {"mining", "logging", "agriculture", "fire", "snare", "hunting", "settlement", "road", "charcoal", "forest_loss_alert", "other"}
 
 
 @router.get("/pressures", response_model=list[PressureOut])

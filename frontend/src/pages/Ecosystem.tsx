@@ -1,9 +1,11 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useApi } from "../lib/useApi";
 import { fmtDate, humanize, num } from "../lib/format";
 import type { Area } from "../lib/types";
 import { BarChart } from "../components/charts";
 import { Empty, ErrorBox, Loading } from "../components/ui";
+import ForestAlerts from "./ForestAlerts";
+import { useSearchParams } from "react-router-dom";
 
 interface Ind { id: number; category: string; indicator: string; district: string | null; area_id: number | null; period_start: string; value: number; unit: string | null; source: string; data_date: string | null }
 
@@ -14,7 +16,9 @@ const LABELS: Record<string, string> = {
 };
 
 export default function Ecosystem() {
-  const [tab, setTab] = useState<"biodiversity" | "ecosystem" | "food">("biodiversity");
+  const [params, setParams] = useSearchParams();
+  const tab = (params.get("tab") as "biodiversity" | "ecosystem" | "food" | "forest") || "biodiversity";
+  const setTab = (t: string) => setParams({ tab: t }, { replace: true });
   const areas = useApi<Area[]>("/areas");
   const inds = useApi<Ind[]>("/indicators");
   const areaName = useMemo(() => Object.fromEntries((areas.data || []).map((a) => [a.id, a.name])), [areas.data]);
@@ -40,7 +44,9 @@ export default function Ecosystem() {
         <button role="tab" aria-selected={tab === "biodiversity"} onClick={() => setTab("biodiversity")}>Biodiversity</button>
         <button role="tab" aria-selected={tab === "ecosystem"} onClick={() => setTab("ecosystem")}>Ecosystem condition</button>
         <button role="tab" aria-selected={tab === "food"} onClick={() => setTab("food")}>Food security and climate</button>
+        <button role="tab" aria-selected={tab === "forest"} onClick={() => setTab("forest")}>Forest alerts</button>
       </div>
+      {tab === "forest" && <ForestAlerts />}
 
       {tab === "biodiversity" && (
         <div className="three">

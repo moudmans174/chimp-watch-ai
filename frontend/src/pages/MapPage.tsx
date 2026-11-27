@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useApi } from "../lib/useApi";
+import { useAuth } from "../lib/auth";
 import { fmtDate, num } from "../lib/format";
 import { INDICATOR_ORDER, type Assessment, type Meta } from "../lib/types";
-import MapView, { BASEMAPS, MapLegend, type Basemap, type MapHandle, type Pressure, type RecordDisplay } from "../components/MapView";
+import MapView, { BASEMAPS, FIELD_COLORS, MapLegend, type FieldData, type Basemap, type MapHandle, type Pressure, type RecordDisplay } from "../components/MapView";
 import { IndicatorStrip, LevelBadge, toast } from "../components/ui";
 
 interface AreaSummary { observations: Record<string, number>; verified_species: number; latest_observation: string | null }
-type Layers = { areas: boolean; chimps: boolean; wildlife: boolean; pressures: boolean };
+type Layers = { areas: boolean; chimps: boolean; wildlife: boolean; pressures: boolean; cameras?: boolean; patrols?: boolean; conflicts?: boolean; forest?: boolean };
 
 const PERIODS: [string, string][] = [["90", "90 days"], ["365", "12 months"], ["1095", "3 years"], ["3650", "All"]];
 
@@ -44,6 +45,14 @@ export default function MapPage() {
   const meta = useApi<Meta>("/meta");
   const latest = useApi<Assessment[]>("/analytics/latest");
   const summary = useApi<AreaSummary>(selected ? `/areas/${selected}/summary` : null);
+  const { user } = useAuth();
+  const canTracks = user?.role !== "viewer";
+  const fdays = Math.min(Number(period), 730);
+  const cams = useApi<NonNullable<FieldData["cameras"]>>(layers.cameras ? "/camera/stations" : null);
+  const pats = useApi<GeoJSON.FeatureCollection>(layers.patrols && canTracks ? `/patrols.geojson?days=${period}` : null);
+  const cons = useApi<NonNullable<FieldData["conflicts"]>>(layers.conflicts ? `/conflicts?days=${period}` : null);
+  const fors = useApi<{ items: NonNullable<FieldData["forest"]> }>(layers.forest ? `/forest-alerts?days=${fdays}` : null);
+  const field: FieldData = useMemo(() => ({ cameras: cams.data, patrols: pats.data, conflicts: cons.data, forest: fors.data?.items }), [cams.data, pats.data, cons.data, fors.data]);
 
   const counts = useMemo(() => {
     const f = obs.data?.features ?? [];
@@ -68,7 +77,8 @@ export default function MapPage() {
     else wrapRef.current?.requestFullscreen?.().catch(() => toast("Full screen isn't available in this browser"));
   };
   const t = (k: keyof Layers) => setLayers((l) => ({ ...l, [k]: !l[k] }));
-  const loading = obs.loading || press.loading;
+  const loading = obs.loading || press.loading || cams.loading || pats.loading || cons.loading || fors.loading;
+  const fcount = (on: boolean | undefined, n: number | undefined) => (on ? n ?? 0 : null);
 
   return (
     <div className={`gis ${isFull ? "is-full" : ""}`} ref={wrapRef}>
@@ -113,6 +123,15 @@ export default function MapPage() {
                 swatch={<i className="sw-dot" style={{ background: "var(--ink-2)" }} />} />
               <LayerRow on={layers.pressures} onClick={() => t("pressures")} label="Human pressure" count={counts.pressures}
                 swatch={<i className="sw-tri" />} />
+              <h3 style={{ marginTop: 14 }}>Field operations</h3>
+              <LayerRow on={!!layers.cameras} onClick={() => t("cameras")} label="Camera stations" count={fcount(layers.cameras, cams.data?.length)}
+                swatch={<i className="sw-dot" style={{ background: FIELD_COLORS.cameras, borderRadius: 2, transform: "rotate(45deg)" }} />} />
+              {canTracks && <LayerRow on={!!layers.patrols} onClick={() => t("patrols")} label="Patrol tracks" count={fcount(layers.patrols, pats.data?.features.length)}
+                swatch={<i className="sw-dot" style={{ background: FIELD_COLORS.patrols, height: 3, borderRadius: 2 }} />} />}
+              <LayerRow on={!!layers.conflicts} onClick={() => t("conflicts")} label="Wildlife conflict" count={fcount(layers.conflicts, cons.data?.length)}
+                swatch={<i className="sw-dot" style={{ background: FIELD_COLORS.conflicts, borderRadius: 1 }} />} />
+              <LayerRow on={!!layers.forest} onClick={() => t("forest")} label="Satellite forest alerts" count={fcount(layers.forest, fors.data?.items.length)}
+                swatch={<i className="sw-dot" style={{ background: FIELD_COLORS.forest }} />} />
               <p className="xs muted" style={{ marginTop: 8 }}>Verified records from the selected period. Chimpanzee sites are generalised to ~{meta.data?.generalisation_km ?? 11} km unless your account has sensitive-location access.</p>
             </section>
             <section>
@@ -127,15 +146,15 @@ export default function MapPage() {
             </section>
             <section>
               <h3>Legend</h3>
-              <MapLegend generalisedKm={meta.data?.generalisation_km} compact />
+              <MapLegend generalisedKm={meta.data?.generalisation_km} compact extra={layers} />
             </section>
           </aside>
         )}
 
         <div className="gis-map">
           <MapView ref={mapRef} areas={areas.data} observations={obs.data} pressures={press.data} layers={layers}
-            basemap={basemap} display={display} selectedAreaId={selected} onAreaClick={choose} showCoordinates />
-          {!panelOpen && <div className="gis-mini-legend"><MapLegend generalisedKm={meta.data?.generalisation_km} compact /></div>}
+            basemap={basemap} display={display} selectedAreaId={selected} onAreaClick={choose} showCoordinates field={field} />
+          {!panelOpen && <div className="gis-mini-legend"><MapLegend generalisedKm={meta.data?.generalisation_km} compact extra={layers} /></div>}
         </div>
 
         {sel && (
@@ -179,13 +198,13 @@ export default function MapPage() {
   );
 }
 
-function LayerRow({ on, onClick, label, count, swatch }: { on: boolean; onClick: () => void; label: string; count: number; swatch: React.ReactNode }) {
+function LayerRow({ on, onClick, label, count, swatch }: { on: boolean; onClick: () => void; label: string; count: number | null; swatch: React.ReactNode }) {
   return (
     <label className={`layer-row ${on ? "on" : ""}`}>
       <input type="checkbox" checked={on} onChange={onClick} />
       <span className="sw-wrap">{swatch}</span>
       <span className="layer-label">{label}</span>
-      <span className="layer-count">{count.toLocaleString("en-GB")}</span>
+      <span className="layer-count">{count == null ? "" : count.toLocaleString("en-GB")}</span>
     </label>
   );
 }

@@ -21,6 +21,10 @@ import Tasks from "./pages/Tasks";
 import Ecosystem from "./pages/Ecosystem";
 import Reports from "./pages/Reports";
 import Admin from "./pages/Admin";
+import Cameras from "./pages/Cameras";
+import Patrols from "./pages/Patrols";
+import Conflicts from "./pages/Conflicts";
+import Community from "./pages/Community";
 import type { ReactNode } from "react";
 import type { Role } from "./lib/types";
 
@@ -51,6 +55,10 @@ function App() {
         <Route path="areas/:id" element={<AreaDetail />} />
         <Route path="tasks" element={<Tasks />} />
         <Route path="ecosystem" element={<Ecosystem />} />
+        <Route path="cameras" element={<Cameras />} />
+        <Route path="patrols" element={<Patrols />} />
+        <Route path="conflict" element={<Conflicts />} />
+        <Route path="community" element={<Community />} />
         <Route path="reports" element={<Reports />} />
         <Route path="profile" element={<Profile />} />
         <Route path="admin" element={<Guard roles={[]}><Admin /></Guard>} />

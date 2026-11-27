@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import math
 import random
+import uuid
 from datetime import date, datetime, timedelta, timezone
 
 from geoalchemy2.shape import from_shape, to_shape
 from shapely.geometry import MultiPolygon, Point, Polygon
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from .db import Base, SessionLocal, engine
 from .models import (
@@ -252,7 +253,8 @@ def seed(today: date | None = None) -> bool:
                                           source=f"{DEMO_SRC} (pattern after CHIRPS)", data_date=today - timedelta(days=40)))
         db.commit()
 
-        # --- run early warning and seed follow-up tasks
+        # --- field-operations demo data, then run early warning and seed follow-up tasks
+        seed_field_demo(db, today)
         risk.run_all(db, notify_users=False)
         top = db.scalars(select(Alert).order_by(Alert.score.desc().nulls_last()).limit(2)).all()
         for a in top:
@@ -271,3 +273,153 @@ if __name__ == "__main__":
     print("Seeded demo data." if created else "Database already contains areas; seed skipped.")
     if created:
         print(f"Demo accounts (password {DEMO_PASSWORD}): admin@, analyst@, ranger@, viewer@chimpwatch.example")
+
+
+# ============================================================================ field-operations demo data
+def _demo_photo(rng: random.Random, label: str) -> bytes:
+    """A plain night-vision-style placeholder, clearly marked as demo (not a real camera-trap photo)."""
+    import io
+
+    from PIL import Image, ImageDraw, ImageFilter
+
+    w, h = 960, 640
+    img = Image.new("L", (w, h), 40)
+    px = img.load()
+    for y in range(0, h, 2):
+        for x in range(0, w, 2):
+            v = 40 + int(30 * (y / h)) + rng.randint(-12, 12)
+            px[x, y] = max(0, min(255, v))
+    d = ImageDraw.Draw(img)
+    for _ in range(14):  # tree trunks
+        x = rng.randint(0, w)
+        d.rectangle([x, 0, x + rng.randint(12, 40), h], fill=rng.randint(55, 90))
+    img = img.filter(ImageFilter.GaussianBlur(1.2)).convert("RGB")
+    d = ImageDraw.Draw(img)
+    d.rectangle([0, h - 34, w, h], fill=(0, 0, 0))
+    d.text((12, h - 26), f"DEMO IMAGE  {label}  replace with real camera-trap photos", fill=(230, 230, 230))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=80)
+    return buf.getvalue()
+
+
+def seed_field_demo(db, today: date | None = None) -> dict:
+    """Add demo camera traps, patrols, conflicts, outreach and forest alerts. Skips if any already exist."""
+    from .models import CameraCapture, CameraDeployment, CameraStation, ConflictIncident, ForestAlert, OutreachActivity, Patrol
+    from .services import forest_alerts
+    from .services.storage import get_storage
+
+    if db.scalar(select(CameraStation.id).limit(1)) or db.scalar(select(Patrol.id).limit(1)):
+        return {"skipped": True}
+    today = today or datetime.now(timezone.utc).date()
+    rng = random.Random(4242)
+    areas = db.scalars(select(ProtectedArea).order_by(ProtectedArea.id)).all()
+    ranger = db.scalar(select(User).where(User.role == Role.field_monitor).order_by(User.id)) or db.scalar(select(User).order_by(User.id))
+    analyst = db.scalar(select(User).where(User.role == Role.analyst).order_by(User.id)) or ranger
+    counts = {"stations": 0, "captures": 0, "patrols": 0, "conflicts": 0, "outreach": 0, "forest_alerts": 0}
+    storage = get_storage()
+
+    for i, area in enumerate(areas):
+        poly = to_shape(area.geom).geoms[0]
+        # --- camera stations
+        for j in range(2):
+            p = random_point_in(rng, poly)
+            st = CameraStation(code=f"{''.join(w[0] for w in area.name.split()[:2]).upper()}-CT{j + 1:02d}", area_id=area.id,
+                               geom=from_shape(p, srid=4326), habitat=rng.choice(["Riverine forest", "Secondary forest", "Forest edge", "Ridge"]),
+                               notes="Demo station", created_by=ranger.id)
+            db.add(st)
+            db.flush()
+            counts["stations"] += 1
+            past = CameraDeployment(station_id=st.id, deployed_on=today - timedelta(days=150), retrieved_on=today - timedelta(days=95),
+                                    status="retrieved", camera_model="Browning BTC-8E", card_id=f"SD{rng.randint(100, 999)}",
+                                    deployed_by=ranger.id, retrieved_by=ranger.id)
+            db.add(past)
+            db.flush()
+            db.add(SurveyEffort(area_id=area.id, org_id=ranger.org_id, method="camera_trap", start_date=past.deployed_on,
+                                end_date=past.retrieved_on, effort_trap_days=55, team=f"Camera {st.code}", source="demo"))
+            if j == 0 or i % 2 == 0:
+                active = CameraDeployment(station_id=st.id, deployed_on=today - timedelta(days=rng.randint(20, 60)), status="active",
+                                          camera_model="Bushnell Core DS", card_id=f"SD{rng.randint(100, 999)}", deployed_by=ranger.id)
+                db.add(active)
+                db.flush()
+                if i < 3 and j == 0:  # a few photos waiting for review
+                    for k in range(2):
+                        data = _demo_photo(rng, f"{st.code} #{k + 1}")
+                        key, digest = storage.put(data, "image/jpeg", f"camera/{st.id}/{active.id}")
+                        db.add(CameraCapture(deployment_id=active.id, captured_at=datetime.combine(today - timedelta(days=rng.randint(2, 15)),
+                                             datetime.min.time(), timezone.utc) + timedelta(hours=rng.choice([2, 5, 19, 22])),
+                                             storage_key=key, content_type="image/jpeg", size_bytes=len(data), sha256=digest,
+                                             classification={"backend": "manual", "detections": [], "review_status": "needs_review",
+                                                             "note": "Demo placeholder image"}, uploaded_by=ranger.id))
+                        counts["captures"] += 1
+        # --- patrols (random walks inside the landscape)
+        for k in range(rng.randint(2, 4)):
+            start_pt = random_point_in(rng, poly)
+            pts, lon, lat = [], start_pt.x, start_pt.y
+            heading = rng.uniform(0, 6.28)
+            for _ in range(rng.randint(40, 90)):
+                heading += rng.uniform(-0.5, 0.5)
+                lon += math.cos(heading) * 0.0012
+                lat += math.sin(heading) * 0.0012
+                pts.append((lon, lat))
+            started = datetime.combine(today - timedelta(days=rng.randint(1, 60)), datetime.min.time(), timezone.utc) + timedelta(hours=7)
+            from shapely.geometry import LineString
+            ls = LineString(pts)
+            line = from_shape(ls, srid=4326)
+            km = float(db.scalar(select(func.ST_Length(func.Geography(func.ST_GeomFromText(ls.wkt, 4326)))))) / 1000
+            db.add(Patrol(client_uuid=str(uuid.uuid4()), area_id=area.id, leader_id=ranger.id, org_id=ranger.org_id,
+                          team=rng.choice(["Team A", "Team B", "Community monitors"]), purpose=rng.choice(["monitoring", "monitoring", "law_enforcement", "survey"]),
+                          started_at=started, ended_at=started + timedelta(hours=round(km / 2.2, 1) + 0.5), distance_km=round(km, 2),
+                          points=len(pts), track=line, source="demo", notes="Demo patrol track"))
+            counts["patrols"] += 1
+        # --- outreach
+        for k in range(2):
+            n = rng.randint(15, 80)
+            db.add(OutreachActivity(client_uuid=str(uuid.uuid4()), area_id=area.id,
+                                    community=rng.choice(["Kpandebu", "Lalehun", "Mapaki", "Kamakwie", "Bumbuna", "Yiraia", "Regent", "Sembehun"]),
+                                    kind=rng.choice(["meeting", "awareness", "school", "training", "agreement"]),
+                                    held_on=today - timedelta(days=rng.randint(5, 200)), participants=n, women=int(n * rng.uniform(.3, .55)),
+                                    youth=int(n * rng.uniform(.15, .4)), facilitator=analyst.full_name,
+                                    summary="Demo activity: discussed chimpanzee protection, crop-raiding mitigation and community monitoring.",
+                                    follow_up="Share mitigation guidance and arrange monitor training" if k == 0 else None,
+                                    follow_up_due=today + timedelta(days=rng.randint(7, 40)) if k == 0 else None,
+                                    created_by=analyst.id, org_id=analyst.org_id, source="demo"))
+            counts["outreach"] += 1
+
+    # --- human-wildlife conflict around landscapes
+    kinds = ["crop_raiding"] * 6 + ["property_damage", "livestock_loss", "wildlife_injured", "human_injury"]
+    crops = ["Rice", "Cassava", "Cocoa", "Banana", "Groundnut", "Maize"]
+    for _ in range(18):
+        area = rng.choice(areas)
+        p = random_point_in(rng, to_shape(area.geom).geoms[0].buffer(0.06))
+        kind = rng.choice(kinds)
+        species = rng.choice(["chimpanzee", "baboon", "monkey", "bush_pig", "elephant"] if kind == "crop_raiding" else ["chimpanzee", "leopard", "other"])
+        status = rng.choice(["reported", "verified", "responded", "closed"])
+        db.add(ConflictIncident(client_uuid=str(uuid.uuid4()), occurred_at=datetime.combine(today - timedelta(days=rng.randint(1, 300)), datetime.min.time(), timezone.utc),
+                                geom=from_shape(p, srid=4326), area_id=area.id, district=area.district,
+                                community=rng.choice(["Kpandebu", "Lalehun", "Mapaki", "Kamakwie", "Bumbuna", "Yiraia", "Regent", "Sembehun"]),
+                                species=species, kind=kind, crops=rng.choice(crops) if kind == "crop_raiding" else None,
+                                loss_estimate_le=round(rng.uniform(300, 6000)) * 1000 if kind in ("crop_raiding", "property_damage", "livestock_loss") else None,
+                                area_damaged_ha=round(rng.uniform(.1, 2.5), 1) if kind == "crop_raiding" else None,
+                                people_affected=rng.randint(1, 12), description="Demo incident report", status=status,
+                                response_notes="Demo response: visited farm, advised on guarding and early harvest." if status in ("responded", "closed") else None,
+                                created_by=ranger.id, org_id=ranger.org_id, source="demo"))
+        counts["conflicts"] += 1
+
+    # --- satellite forest-disturbance alerts (demo pixels in the most pressured landscapes)
+    for area in areas:
+        if area.name.split()[0] not in ("Kangari", "Western", "Tingi", "Outamba"):
+            continue
+        poly = to_shape(area.geom).geoms[0]
+        rows = []
+        for _ in range(rng.randint(2, 4)):
+            c = random_point_in(rng, poly)
+            d0 = today - timedelta(days=rng.randint(3, 50))
+            for _ in range(rng.randint(3, 25)):
+                rows.append({"latitude": c.y + rng.uniform(-.004, .004), "longitude": c.x + rng.uniform(-.004, .004),
+                             "gfw_integrated_alerts__date": (d0 - timedelta(days=rng.randint(0, 5))).isoformat(),
+                             "gfw_integrated_alerts__confidence": rng.choice(["nominal", "high", "high"])})
+        new = forest_alerts.ingest(db, area, rows, source="demo")
+        forest_alerts.cluster_to_pressures(db, new)
+        counts["forest_alerts"] += len(new)
+    db.commit()
+    return counts

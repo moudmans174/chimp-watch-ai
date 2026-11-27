@@ -62,6 +62,7 @@ export interface Meta {
   evidence_types: string[]; roles: Role[]; alert_levels: Level[]; alert_statuses: string[];
   task_statuses: string[]; pressure_kinds: string[]; indicators: Record<string, string>;
   model_version: string; generalisation_km: number;
+  conflict_species?: string[]; conflict_kinds?: string[]; outreach_kinds?: string[];
 }
 
 export const INDICATOR_ORDER = [

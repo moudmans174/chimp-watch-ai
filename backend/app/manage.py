@@ -6,6 +6,8 @@ Examples (inside Docker: docker compose exec api python -m app.manage ...):
   python -m app.manage list-users
   python -m app.manage test-email --to you@example.org
   python -m app.manage run-assessment
+  python -m app.manage seed-field-demo
+  python -m app.manage forest-sync --days 60
 """
 import argparse
 import getpass
@@ -83,6 +85,19 @@ def test_email(a):
     print("Sent via SMTP." if mailer.configured() else "SMTP not configured: the message was written to the log.")
 
 
+def seed_field_demo(_a):
+    from .seed import seed_field_demo as run
+    with SessionLocal() as db:
+        out = run(db)
+    print("Field demo data already present; nothing added." if out.get("skipped") else f"Added demo field data: {out}")
+
+
+def forest_sync(a):
+    from .services import forest_alerts
+    with SessionLocal() as db:
+        print(forest_alerts.sync(db, lookback_days=a.days))
+
+
 def run_assessment(_a):
     from .services import risk
     with SessionLocal() as db:
@@ -108,6 +123,10 @@ def main():
     t.add_argument("--to", required=True)
     t.set_defaults(fn=test_email)
     sub.add_parser("run-assessment", help="Recompute all risk assessments now").set_defaults(fn=run_assessment)
+    sub.add_parser("seed-field-demo", help="Add demo camera traps, patrols, conflicts, outreach and forest alerts").set_defaults(fn=seed_field_demo)
+    f = sub.add_parser("forest-sync", help="Fetch satellite forest alerts from Global Forest Watch now")
+    f.add_argument("--days", type=int, default=None)
+    f.set_defaults(fn=forest_sync)
     a = p.parse_args()
     a.fn(a)
 
